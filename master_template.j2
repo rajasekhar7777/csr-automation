@@ -1,0 +1,25 @@
+! --- Modular Config ---
+hostname {{ inventory_hostname }}
+
+! [ SECTION: VPN ]
+{% if vpn_type == "VTI" %}
+! Route-Based VPN
+interface Tunnel1
+ ip address {{ tunnel_ip }} 255.255.255.252
+ tunnel source {{ local_wan_ip }}
+ tunnel destination {{ remote_wan_ip }}
+ tunnel protection ipsec profile IPSEC_PROF
+{% elif vpn_type == "Crypto-Map" %}
+! Policy-Based VPN
+crypto map CMAP 10 ipsec-isakmp 
+ set peer {{ remote_wan_ip }}
+ match address 101
+{% endif %}
+
+! [ SECTION: BGP ]
+{% if enable_bgp %}
+router bgp {{ local_asn }}
+ neighbor {{ peer_ip }} remote-as {{ remote_asn }}
+ address-family ipv4
+  neighbor {{ peer_ip }} activate
+{% endif %}
