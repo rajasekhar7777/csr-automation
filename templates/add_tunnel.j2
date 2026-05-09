@@ -1,42 +1,57 @@
-! --- Modular Config Additive ---
-hostname {{ hostname | default(inventory_hostname) }}
+! --- Modular Tunnel Logic ---
 
-! [ SECTION: IKE LOGIC ]
+! 1. IKE Selection
 {% if ike_version | default('2') == "2" %}
-crypto ikev2 keyring KEYRING_T{{ tunnel_id | default('999') }}
- peer PEER_T{{ tunnel_id | default('999') }}
-  address {{ remote_peer_ip | default('1.1.1.1') }}
-  pre-shared-key {{ vpn_psk | default('Cisco123') }}
+crypto ikev2 keyring KEYRING_T{{ tunnel_id }}
+ peer PEER_T{{ tunnel_id }}
+  address {{ remote_peer_ip }}
+  pre-shared-key {{ vpn_psk }}
 !
-crypto ikev2 profile PROFILE_T{{ tunnel_id | default('999') }}
- match identity remote address {{ remote_peer_ip | default('1.1.1.1') }} 255.255.255.255
+crypto ikev2 profile PROFILE_T{{ tunnel_id }}
+ match identity remote address {{ remote_peer_ip }} 255.255.255.255
  authentication remote pre-share
  authentication local pre-share
- keyring local KEYRING_T{{ tunnel_id | default('999') }}
+ keyring local KEYRING_T{{ tunnel_id }}
+ lifetime 28800
+ dpd 10 5 on-demand
 {% else %}
-crypto isakmp key {{ vpn_psk | default('Cisco123') }} address {{ remote_peer_ip | default('1.1.1.1') }}
+crypto isakmp key {{ vpn_psk }} address {{ remote_peer_ip }}
+crypto isakmp profile PROF_T{{ tunnel_id }}
+   keyring VPN
+   match identity address {{ remote_peer_ip }} 255.255.255.255
 {% endif %}
 
-! [ SECTION: IPSEC PROFILE ]
-crypto ipsec profile IPSEC_PROF_T{{ tunnel_id | default('999') }}
+! 2. IPsec Profile
+crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
  set transform-set {{ transform_set | default('AES256-SHA256') }}
+ set pfs {{ pfs_group | default('group20') }}
  {% if ike_version | default('2') == "2" %}
- set ikev2-profile PROFILE_T{{ tunnel_id | default('999') }}
+ set ikev2-profile PROFILE_T{{ tunnel_id }}
+ {% else %}
+ set isakmp-profile PROF_T{{ tunnel_id }}
  {% endif %}
 
-! [ SECTION: INTERFACE ]
+! 3. Interface (Only if VTI/Route-Based)
 {% if vpn_mode | default('route_based') == "route_based" %}
-interface Tunnel{{ tunnel_id | default('999') }}
- description **** {{ tunnel_desc | default('NEW_TUNNEL') }} ****
- ip address {{ tunnel_local_ip | default('169.254.1.1') }} 255.255.255.252
- tunnel source {{ wan_interface | default('GigabitEthernet1') }}
- tunnel destination {{ remote_peer_ip | default('1.1.1.1') }}
- tunnel protection ipsec profile IPSEC_PROF_T{{ tunnel_id | default('999') }}
+interface Tunnel{{ tunnel_id }}
+ description **** {{ tunnel_desc }} ****
+ ip address {{ tunnel_local_ip }} 255.255.255.252
+ tunnel source GigabitEthernet1
+ tunnel destination {{ remote_peer_ip }}
+ tunnel mode ipsec ipv4
+ tunnel protection ipsec profile IPSEC_PROF_T{{ tunnel_id }}
+ ip tcp adjust-mss 1370
 {% endif %}
 
-! [ SECTION: BGP ]
+! 4. BGP (Optional)
 {% if enable_bgp | default('false') == "true" %}
-router bgp {{ local_asn | default('398957') }}
+router bgp 398957
  neighbor {{ bgp_neighbor_ip }} remote-as {{ remote_asn }}
- neighbor {{ bgp_neighbor_ip }} activate
+ neighbor {{ bgp_neighbor_ip }} description BGP_TO_{{ tunnel_desc }}
+ {% if vpn_mode | default('route_based') == "route_based" %}
+ neighbor {{ bgp_neighbor_ip }} update-source Tunnel{{ tunnel_id }}
+ {% endif %}
+ address-family ipv4
+  neighbor {{ bgp_neighbor_ip }} activate
+ exit-address-family
 {% endif %}
