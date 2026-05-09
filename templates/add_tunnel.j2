@@ -1,3 +1,8 @@
+! --- 1. Global Transform Sets (Matches your Production log) ---
+crypto ipsec transform-set AES256-SHA256 esp-aes 256 esp-sha256-hmac
+ mode tunnel
+
+! --- 2. IKE Selection ---
 {% if ike_version | string == "2" %}
 crypto ikev2 keyring KEYRING_T{{ tunnel_id }}
  peer PEER_T{{ tunnel_id }}
@@ -17,6 +22,7 @@ crypto isakmp profile PROF_T{{ tunnel_id }}
    match identity address {{ remote_peer_ip }} 255.255.255.255
 {% endif %}
 
+! --- 3. IPsec Profile ---
 crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
  set transform-set AES256-SHA256
  set pfs group20
@@ -26,6 +32,7 @@ crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
  set isakmp-profile PROF_T{{ tunnel_id }}
  {% endif %}
 
+! --- 4. Interface Logic ---
 {% if vpn_mode | string == "route_based" %}
 interface Tunnel{{ tunnel_id }}
  description **** {{ tunnel_desc }} ****
@@ -36,3 +43,17 @@ interface Tunnel{{ tunnel_id }}
  tunnel protection ipsec profile IPSEC_PROF_T{{ tunnel_id }}
  ip tcp adjust-mss 1370
 {% endif %}
+
+! --- 5. BGP Logic ---
+{% if enable_bgp | string == "true" %}
+router bgp 398957
+ neighbor {{ bgp_neighbor_ip }} remote-as {{ remote_asn }}
+ neighbor {{ bgp_neighbor_ip }} description BGP_TO_{{ tunnel_desc }}
+ {% if vpn_mode == "route_based" %}
+ neighbor {{ bgp_neighbor_ip }} update-source Tunnel{{ tunnel_id }}
+ {% endif %}
+ address-family ipv4
+  neighbor {{ bgp_neighbor_ip }} activate
+ exit-address-family
+{% endif %}
+
