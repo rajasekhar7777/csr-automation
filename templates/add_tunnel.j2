@@ -1,6 +1,3 @@
-! --- Deployment for Tunnel {{ tunnel_id }} ---
-! Logic: IKEv{{ ike_version }}, Mode: {{ vpn_mode }}
-
 {% if ike_version | string == "2" %}
 crypto ikev2 keyring KEYRING_T{{ tunnel_id }}
  peer PEER_T{{ tunnel_id }}
@@ -11,7 +8,23 @@ crypto ikev2 profile PROFILE_T{{ tunnel_id }}
  authentication remote pre-share
  authentication local pre-share
  keyring local KEYRING_T{{ tunnel_id }}
+ lifetime 28800
+ dpd 10 5 on-demand
+{% else %}
+crypto isakmp key {{ vpn_psk }} address {{ remote_peer_ip }}
+crypto isakmp profile PROF_T{{ tunnel_id }}
+   keyring VPN
+   match identity address {{ remote_peer_ip }} 255.255.255.255
 {% endif %}
+
+crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
+ set transform-set AES256-SHA256
+ set pfs group20
+ {% if ike_version | string == "2" %}
+ set ikev2-profile PROFILE_T{{ tunnel_id }}
+ {% else %}
+ set isakmp-profile PROF_T{{ tunnel_id }}
+ {% endif %}
 
 {% if vpn_mode | string == "route_based" %}
 interface Tunnel{{ tunnel_id }}
@@ -21,4 +34,5 @@ interface Tunnel{{ tunnel_id }}
  tunnel destination {{ remote_peer_ip }}
  tunnel mode ipsec ipv4
  tunnel protection ipsec profile IPSEC_PROF_T{{ tunnel_id }}
+ ip tcp adjust-mss 1370
 {% endif %}
