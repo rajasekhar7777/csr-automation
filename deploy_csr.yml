@@ -9,10 +9,6 @@
       set_fact:
         generated_config: "{{ lookup('template', 'templates/add_tunnel.j2') }}"
 
-    - name: DEBUG - Show me the generated config
-      debug:
-        var: generated_config
-
     - name: Apply Configuration
       cisco.ios.ios_config:
         lines: "{{ generated_config.splitlines() }}"
