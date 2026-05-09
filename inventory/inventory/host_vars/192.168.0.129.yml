@@ -1,0 +1,11 @@
+---
+# Permanent Router Identity (from your PuTTY log)
+hostname: "ZUSE1P2GBSSSVPN001"
+local_wan_ip: "10.138.1.4"
+local_gateway: "10.138.1.1"
+local_asn: 398957
+wan_interface: "GigabitEthernet1"
+
+# Connection Settings
+ansible_network_os: cisco.ios.ios
+ansible_connection: network_cli
