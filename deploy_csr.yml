@@ -3,6 +3,9 @@
   hosts: all
   gather_facts: no
   connection: network_cli
+  # Add these two lines:
+  collections:
+    - cisco.ios
 
   tasks:
     - name: Generate and Apply Configuration
