@@ -2,11 +2,7 @@
 - name: Modular CSR Configuration
   hosts: all
   gather_facts: no
-  connection: network_cli
-  # Add these two lines:
-  collections:
-    - cisco.ios
-
+  # Connection should be managed by variables in AWX, but you can force it here
   tasks:
     - name: Generate and Apply Configuration
       cisco.ios.ios_config:
