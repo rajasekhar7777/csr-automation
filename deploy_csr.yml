@@ -1,9 +1,9 @@
 
-
 ---
 - name: Deploy New Tunnel to Production CSR
-  hosts: csr_routers
+  hosts: all  <-- Change this from csr_routers to all
   gather_facts: no
+  connection: network_cli
 
   tasks:
     - name: Push Additive Configuration
