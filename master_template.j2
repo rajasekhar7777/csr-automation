@@ -1,15 +1,139 @@
-hostname {{ inventory_hostname }}
-{% if enable_bgp == "true" %}
-router bgp {{ local_asn | default('65001') }}
- neighbor {{ neighbor_ip | default('1.1.1.1') }} remote-as {{ remote_asn | default('65002') }}
- address-family ipv4
-  neighbor {{ neighbor_ip | default('1.1.1.1') }} activate
- exit-address-family
+! --- SYSTEM BLOCK ---
+hostname {{ hostname | default(inventory_hostname) }}
+
+! ==========================================================
+! SECTION: IKE VERSION 1 (ISAKMP) - Only runs if ike_version == 1
+! ==========================================================
+{% if ike_version == 1 %}
+{% for policy in isakmp_policies %}
+crypto isakmp policy {{ policy.priority }}
+ encr {{ policy.encr | default('aes 256') }}
+ hash {{ policy.hash | default('sha256') }}
+ authentication pre-share
+ group {{ policy.group | default('15') }}
+{% endfor %}
+
+{% if isakmp_keyring is defined %}
+crypto keyring {{ isakmp_keyring.name }}
+ {% for key in isakmp_keyring.keys %}
+  pre-shared-key address {{ key.address }} key {{ key.psk }}
+ {% endfor %}
 {% endif %}
-{% if vpn_type == "VTI" %}
-interface Tunnel1
- ip address {{ tunnel_ip | default('10.255.255.1') }} 255.255.255.252
- tunnel source {{ local_wan_ip | default('GigabitEthernet1') }}
- tunnel destination {{ remote_wan_ip | default('1.1.1.1') }}
- tunnel protection ipsec profile IPSEC_PROF
+
+{% for prof in isakmp_profiles %}
+crypto isakmp profile {{ prof.name }}
+   keyring {{ prof.keyring }}
+   {% if prof.local_fqdn is defined %}self-identity fqdn {{ prof.local_fqdn }}{% endif %}
+   {% if prof.match_host is defined %}match identity host {{ prof.match_host }}{% endif %}
+   {% if prof.match_address is defined %}match identity address {{ prof.match_address }} 255.255.255.255{% endif %}
+{% endfor %}
+{% endif %}
+
+! ==========================================================
+! SECTION: IKE VERSION 2 - Only runs if ike_version == 2
+! ==========================================================
+{% if ike_version == 2 %}
+crypto ikev2 proposal {{ ike_proposal_name | default('AZ-PROP') }}
+ encryption {{ ike_encryption | default('aes-cbc-256') }}
+ integrity {{ ike_integrity | default('sha256') }}
+ group {{ ike_group | default('14') }}
+
+crypto ikev2 policy {{ ike_policy_name | default('AZ-POL') }}
+ match address local {{ local_wan_ip }}
+ proposal {{ ike_proposal_name | default('AZ-PROP') }}
+
+{% for keyring in ike2_keyrings %}
+crypto ikev2 keyring {{ keyring.name }}
+ {% for peer in keyring.peers %}
+ peer {{ peer.name }}
+  address {{ peer.address }}
+  pre-shared-key {{ peer.psk }}
+ {% endfor %}
+{% endfor %}
+
+{% for prof in ike2_profiles %}
+crypto ikev2 profile {{ prof.name }}
+ authentication remote pre-share
+ authentication local pre-share
+ keyring local {{ prof.keyring }}
+ {% for addr in prof.match_addresses %}
+ match identity remote address {{ addr }} 255.255.255.255
+ {% endfor %}
+ dpd {{ prof.dpd | default('10 5 on-demand') }}
+{% endfor %}
+{% endif %}
+
+! ==========================================================
+! SECTION: IPSEC & VPN TYPE (VTI vs Crypto Map)
+! ==========================================================
+crypto ipsec transform-set AES256-SHA256 esp-aes 256 esp-sha256-hmac
+ mode tunnel
+crypto ipsec transform-set AES256-SHA1 esp-aes 256 esp-sha-hmac
+ mode tunnel
+
+! --- ROUTE BASED (VTI) ---
+{% if vpn_mode == "route_based" %}
+{% for ipsec_prof in ipsec_profiles %}
+crypto ipsec profile {{ ipsec_prof.name }}
+ set transform-set {{ ipsec_prof.transform_set }}
+ set pfs {{ ipsec_prof.pfs | default('group15') }}
+ {% if ike_version == 1 %}set isakmp-profile {{ ipsec_prof.isakmp_profile }}{% endif %}
+ {% if ike_version == 2 %}set ikev2-profile {{ ipsec_prof.ike2_profile }}{% endif %}
+{% endfor %}
+
+{% for tun in vti_tunnels %}
+interface Tunnel{{ tun.id }}
+ description {{ tun.description }}
+ ip address {{ tun.ip }} {{ tun.mask }}
+ tunnel source {{ tun.source | default('GigabitEthernet1') }}
+ tunnel destination {{ tun.dest_ip }}
+ tunnel mode ipsec ipv4
+ tunnel protection ipsec profile {{ tun.ipsec_profile }}
+ ip tcp adjust-mss {{ tun.mss | default('1370') }}
+{% endfor %}
+{% endif %}
+
+! --- POLICY BASED (Crypto Map) ---
+{% if vpn_mode == "policy_based" %}
+{% for cmap in crypto_maps %}
+ip access-list extended {{ cmap.acl_name }}
+ {{ cmap.acl_content }}
+!
+crypto map {{ cmap.map_name }} {{ cmap.seq }} ipsec-isakmp
+ description {{ cmap.description }}
+ set peer {{ cmap.peer_ip }}
+ set transform-set {{ cmap.transform_set }}
+ {% if ike_version == 1 %}set isakmp-profile {{ cmap.isakmp_profile }}{% endif %}
+ {% if ike_version == 2 %}set ikev2-profile {{ cmap.ike2_profile }}{% endif %}
+ match address {{ cmap.acl_name }}
+{% endfor %}
+{% endif %}
+
+! ==========================================================
+! SECTION: ROUTING (Static, SLA, BGP)
+! ==========================================================
+{% for sla in ip_slas %}
+ip sla {{ sla.id }}
+ icmp-echo {{ sla.target }} source-interface {{ sla.source }}
+ip sla schedule {{ sla.id }} life forever start-time now
+track {{ sla.track_id }} ip sla {{ sla.id }} reachability
+{% endfor %}
+
+{% for route in static_routes %}
+ip route {{ route.prefix }} {{ route.mask }} {{ route.next_hop }} {% if route.track is defined %}track {{ route.track }}{% endif %} name {{ route.name }}
+{% endfor %}
+
+{% if bgp is defined %}
+router bgp {{ bgp.asn }}
+ {% for nbr in bgp.neighbors %}
+ neighbor {{ nbr.ip }} remote-as {{ nbr.remote_as }}
+ neighbor {{ nbr.ip }} update-source {{ nbr.update_source }}
+ {% if nbr.password is defined %}neighbor {{ nbr.ip }} password 7 {{ nbr.password }}{% endif %}
+ {% endfor %}
+ !
+ address-family ipv4
+  {% for nbr in bgp.neighbors %}
+  neighbor {{ nbr.ip }} activate
+  {% endfor %}
+ exit-address-family
 {% endif %}
