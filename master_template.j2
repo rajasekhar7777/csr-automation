@@ -1,24 +1,15 @@
-! --- MODULAR CONFIG ---
 hostname {{ inventory_hostname }}
-
+{% if enable_bgp == "true" %}
+router bgp {{ local_asn | default('65001') }}
+ neighbor {{ neighbor_ip | default('1.1.1.1') }} remote-as {{ remote_asn | default('65002') }}
+ address-family ipv4
+  neighbor {{ neighbor_ip | default('1.1.1.1') }} activate
+ exit-address-family
+{% endif %}
 {% if vpn_type == "VTI" %}
-! VTI Config
 interface Tunnel1
- ! The '| default' prevents the crash. If variable is missing, it uses the text in quotes.
  ip address {{ tunnel_ip | default('10.255.255.1') }} 255.255.255.252
  tunnel source {{ local_wan_ip | default('GigabitEthernet1') }}
  tunnel destination {{ remote_wan_ip | default('1.1.1.1') }}
  tunnel protection ipsec profile IPSEC_PROF
-{% endif %}
-
-{% if vpn_type == "Crypto-Map" %}
-! Crypto Map Config
-crypto map CMAP 10 ipsec-isakmp 
- set peer {{ remote_wan_ip | default('1.1.1.1') }}
- match address 101
-{% endif %}
-
-{% if enable_bgp == "true" %}
-router bgp {{ local_asn | default('65001') }}
- neighbor {{ neighbor_ip | default('1.1.1.1') }} remote-as {{ remote_asn | default('65002') }}
 {% endif %}
