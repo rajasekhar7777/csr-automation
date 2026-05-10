@@ -1,59 +1,71 @@
-! --- 1. Global Transform Sets (Matches your Production log) ---
-crypto ipsec transform-set AES256-SHA256 esp-aes 256 esp-sha256-hmac
- mode tunnel
 
-! --- 2. IKE Selection ---
-{% if ike_version | string == "2" %}
+! --- A.1 to A.6: Crypto Foundation ---
+crypto ikev2 proposal azure-proposal-VNG
+ encryption aes-cbc-256 aes-cbc-128
+ integrity sha1 sha256
+ group 2 20 21 14 24
+
+crypto ikev2 policy azure-policy-VNG
+ match address local {{ local_wan_ip | default('10.138.1.4') }}
+ proposal azure-proposal-VNG
+
 crypto ikev2 keyring KEYRING_T{{ tunnel_id }}
- peer PEER_T{{ tunnel_id }}
+ peer {{ tunnel_desc }}
   address {{ remote_peer_ip }}
   pre-shared-key {{ vpn_psk }}
-crypto ikev2 profile PROFILE_T{{ tunnel_id }}
+
+crypto ikev2 profile PROF_T{{ tunnel_id }}
  match identity remote address {{ remote_peer_ip }} 255.255.255.255
  authentication remote pre-share
  authentication local pre-share
  keyring local KEYRING_T{{ tunnel_id }}
- lifetime 28800
  dpd 10 5 on-demand
-{% else %}
-crypto isakmp key {{ vpn_psk }} address {{ remote_peer_ip }}
-crypto isakmp profile PROF_T{{ tunnel_id }}
-   keyring VPN
-   match identity address {{ remote_peer_ip }} 255.255.255.255
-{% endif %}
 
-! --- 3. IPsec Profile ---
+crypto ipsec transform-set AES256-SHA256 esp-aes 256 esp-sha256-hmac
+ mode tunnel
+
+! --- B.1 to B.2: VTI Connectivity ---
 crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
  set transform-set AES256-SHA256
  set pfs group20
- {% if ike_version | string == "2" %}
- set ikev2-profile PROFILE_T{{ tunnel_id }}
- {% else %}
- set isakmp-profile PROF_T{{ tunnel_id }}
- {% endif %}
+ set ikev2-profile PROF_T{{ tunnel_id }}
 
-! --- 4. Interface Logic ---
-{% if vpn_mode | string == "route_based" %}
 interface Tunnel{{ tunnel_id }}
  description **** {{ tunnel_desc }} ****
  ip address {{ tunnel_local_ip }} 255.255.255.252
  tunnel source GigabitEthernet1
  tunnel destination {{ remote_peer_ip }}
- tunnel mode ipsec ipv4
  tunnel protection ipsec profile IPSEC_PROF_T{{ tunnel_id }}
  ip tcp adjust-mss 1370
+
+! --- G4: BGP, Prefix-Lists, and Route-Maps ---
+{% if new_prefix_name is defined %}
+ip prefix-list {{ new_prefix_name }} seq 5 permit {{ new_prefix_net }}
 {% endif %}
 
-! --- 5. BGP Logic ---
-{% if enable_bgp | string == "true" %}
+{% if new_route_map_name is defined %}
+route-map {{ new_route_map_name }} permit 11
+ set local-preference 200
+ set community 3989:200
+ match ip address prefix-list {{ new_prefix_name }}
+{% endif %}
+
 router bgp 398957
  neighbor {{ bgp_neighbor_ip }} remote-as {{ remote_asn }}
  neighbor {{ bgp_neighbor_ip }} description BGP_TO_{{ tunnel_desc }}
- {% if vpn_mode == "route_based" %}
  neighbor {{ bgp_neighbor_ip }} update-source Tunnel{{ tunnel_id }}
- {% endif %}
  address-family ipv4
   neighbor {{ bgp_neighbor_ip }} activate
+  {% if new_route_map_name is defined %}
+  neighbor {{ bgp_neighbor_ip }} route-map {{ new_route_map_name }} out
+  {% endif %}
  exit-address-family
-{% endif %}
 
+! --- G2/G3/SLA: Tracking ---
+ip sla {{ tunnel_id }}
+ icmp-echo {{ bgp_neighbor_ip }} source-interface Tunnel{{ tunnel_id }}
+ frequency 5
+ip sla schedule {{ tunnel_id }} life forever start-time now
+track {{ tunnel_id }} ip sla {{ tunnel_id }} reachability
+
+ip route {{ remote_peer_ip }} 255.255.255.255 10.138.1.1 name WAN_ROUTE_T{{ tunnel_id }}
