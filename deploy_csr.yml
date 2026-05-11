@@ -1,18 +1,14 @@
 ---
-- name: Modular CSR Configuration (Netmiko Path)
+- name: Modular CSR Configuration (AWX Fix)
   hosts: all
   gather_facts: no
-  connection: local  # This is the secret to fixing the AWX SSH error
+  connection: network_cli
 
   tasks:
-    - name: Generate the Config from Template
+    - name: Generate the Config
       set_fact:
         generated_config: "{{ lookup('template', 'templates/add_tunnel.j2') }}"
 
-    - name: Apply Configuration via Netmiko
-      ansible.netcommon.netmiko_config:
-        config_commands: "{{ generated_config.splitlines() }}"
-        host: "{{ inventory_hostname }}"
-        username: "{{ ansible_user }}"
-        password: "{{ ansible_password }}"
-        device_type: cisco_ios
+    - name: Apply Configuration
+      cisco.ios.ios_config:
+        lines: "{{ generated_config.splitlines() }}"
