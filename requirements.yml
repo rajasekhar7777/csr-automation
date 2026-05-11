@@ -3,6 +3,3 @@ collections:
   - name: cisco.ios
   - name: ansible.netcommon
 
-python:
-  - ansible-pylibssh
-  - paramiko
