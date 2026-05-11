@@ -1,14 +1,10 @@
 ---
-- name: Modular CSR Configuration (Standard Path)
+- name: Modular CSR Configuration
   hosts: all
   gather_facts: no
   connection: network_cli
 
   tasks:
-    - name: Generate the Config
-      set_fact:
-        generated_config: "{{ lookup('template', 'templates/add_tunnel.j2') }}"
-
-    - name: Apply Configuration
+    - name: Generate and Apply Config
       cisco.ios.ios_config:
-        lines: "{{ generated_config.splitlines() }}"
+        lines: "{{ lookup('template', 'templates/add_tunnel.j2') }}"
