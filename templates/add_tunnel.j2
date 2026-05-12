@@ -36,15 +36,36 @@ interface Tunnel{{ tunnel_id }}
  tunnel protection ipsec profile IPSEC_PROF_T{{ tunnel_id }}
  ip tcp adjust-mss 1370
 
-{# ---- Optional Prefix-list / Route-map ---- #}
-{% if new_prefix_name is defined and new_prefix_name | length > 0 %}
-ip prefix-list {{ new_prefix_name }} seq 5 permit {{ new_prefix_net }}
+{# ---- Inbound prefix-list ---- #}
+{% if inbound_pl_name is defined and inbound_pl_name | length > 0
+      and inbound_prefixes is defined and inbound_prefixes | length > 0 %}
+{% set in_lines = inbound_prefixes.splitlines() | map('trim') | reject('equalto','') | list %}
+{% for prefix in in_lines %}
+ip prefix-list {{ inbound_pl_name }} seq {{ loop.index * 5 }} permit {{ prefix }}
+{% endfor %}
 {% endif %}
-{% if new_route_map_name is defined and new_route_map_name | length > 0 %}
-route-map {{ new_route_map_name }} permit 11
- set local-preference 200
- set community 3989:200
- match ip address prefix-list {{ new_prefix_name }}
+
+{# ---- Outbound prefix-list ---- #}
+{% if outbound_pl_name is defined and outbound_pl_name | length > 0
+      and outbound_prefixes is defined and outbound_prefixes | length > 0 %}
+{% set out_lines = outbound_prefixes.splitlines() | map('trim') | reject('equalto','') | list %}
+{% for prefix in out_lines %}
+ip prefix-list {{ outbound_pl_name }} seq {{ loop.index * 5 }} permit {{ prefix }}
+{% endfor %}
+{% endif %}
+
+{# ---- Inbound route-map ---- #}
+{% if inbound_rm_name is defined and inbound_rm_name | length > 0
+      and inbound_pl_name is defined and inbound_pl_name | length > 0 %}
+route-map {{ inbound_rm_name }} permit 10
+ match ip address prefix-list {{ inbound_pl_name }}
+{% endif %}
+
+{# ---- Outbound route-map ---- #}
+{% if outbound_rm_name is defined and outbound_rm_name | length > 0
+      and outbound_pl_name is defined and outbound_pl_name | length > 0 %}
+route-map {{ outbound_rm_name }} permit 10
+ match ip address prefix-list {{ outbound_pl_name }}
 {% endif %}
 
 {# ---- BGP ---- #}
@@ -54,8 +75,12 @@ router bgp 398957
  neighbor {{ bgp_neighbor_ip }} update-source Tunnel{{ tunnel_id }}
  address-family ipv4
   neighbor {{ bgp_neighbor_ip }} activate
-{% if new_route_map_name is defined and new_route_map_name | length > 0 %}
-  neighbor {{ bgp_neighbor_ip }} route-map {{ new_route_map_name }} out
+  neighbor {{ bgp_neighbor_ip }} soft-reconfiguration inbound
+{% if inbound_rm_name is defined and inbound_rm_name | length > 0 %}
+  neighbor {{ bgp_neighbor_ip }} route-map {{ inbound_rm_name }} in
+{% endif %}
+{% if outbound_rm_name is defined and outbound_rm_name | length > 0 %}
+  neighbor {{ bgp_neighbor_ip }} route-map {{ outbound_rm_name }} out
 {% endif %}
  exit-address-family
 
