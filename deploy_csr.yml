@@ -1,10 +1,15 @@
 ---
 - name: Modular CSR Configuration
   hosts: all
-  gather_facts: no
-  connection: network_cli
-
+  gather_facts: false
+  # connection/network_os now come from inventory host_vars — remove from play
   tasks:
     - name: Generate and Apply Config
       cisco.ios.ios_config:
-        lines: "{{ lookup('template', 'templates/add_tunnel.j2') }}"
+        src: templates/add_tunnel.j2          # ios_config natively renders Jinja
+      register: cfg_result
+
+    - name: Save running-config to startup
+      cisco.ios.ios_command:
+        commands: write memory
+      when: cfg_result.changed
