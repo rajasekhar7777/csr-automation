@@ -3,6 +3,12 @@
 {% set safe_desc = tunnel_desc | regex_replace('\\s+', '_') %}
 {% set effective_acl_name = acl_name if (acl_name is defined and acl_name | length > 0) else safe_desc %}
 
+{# Mask → prefix-length lookup (pure Jinja, no custom filter needed) #}
+{% set _octet_bits = {
+  '0':0, '128':1, '192':2, '224':3, '240':4,
+  '248':5, '252':6, '254':7, '255':8
+} %}
+
 {# ---- Crypto Foundation ---- #}
 crypto ikev2 proposal azure-proposal-VNG
  encryption aes-cbc-256 aes-cbc-128
@@ -27,13 +33,12 @@ crypto ikev2 profile PROF_T{{ tunnel_id }}
 crypto ipsec transform-set AES256-SHA256 esp-aes 256 esp-sha256-hmac
  mode tunnel
 
-{# ---- VTI ---- #}
 crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
  set transform-set AES256-SHA256
  set pfs group20
  set ikev2-profile PROF_T{{ tunnel_id }}
 
-{# ---- ACL (only when acl_entries provided) ---- #}
+{# ---- ACL ---- #}
 {% if acl_entries is defined and acl_entries | length > 0 %}
 {% set acl_lines = acl_entries.splitlines() | map('trim') | reject('equalto','') | list %}
 ip access-list extended {{ effective_acl_name }}
@@ -55,43 +60,32 @@ interface Tunnel{{ tunnel_id }}
  ip access-group {{ effective_acl_name }} in
 {% endif %}
 
-{# ---- IP SLA (peer auto-derived via /30 unless overridden) ---- #}
+{# ---- IP SLA (peer auto-derived from /30 unless overridden) ---- #}
 ip sla {{ tunnel_id }}
  icmp-echo {{ effective_sla_target }} source-interface Tunnel{{ tunnel_id }}
  frequency 5
 ip sla schedule {{ tunnel_id }} life forever start-time now
 track {{ tunnel_id }} ip sla {{ tunnel_id }} reachability
 
-{# ---- Host route to remote VPN peer over the WAN ---- #}
 ip route {{ remote_peer_ip }} 255.255.255.255 10.138.1.1 name WAN_ROUTE_T{{ tunnel_id }}
 
-{# =================================================================== #}
-{# Routing-specific blocks: prefix-list filters + BGP neighbor (dyn),  #}
-{# static routes (static). BGP network advertisements + CSR_LIST       #}
-{# prefix-list entries happen for BOTH modes when local_networks set.  #}
-{# =================================================================== #}
-
-{# ---- Inbound prefix-list (DYN only) ---- #}
+{# ---- Inbound/Outbound prefix-list & route-map (DYNAMIC mode only) ---- #}
 {% if routing_type | default('dynamic') == 'dynamic'
       and inbound_pl_name is defined and inbound_pl_name | length > 0
       and inbound_prefixes is defined and inbound_prefixes | length > 0 %}
-{% set in_lines = inbound_prefixes.splitlines() | map('trim') | reject('equalto','') | list %}
-{% for prefix in in_lines %}
+{% for prefix in (inbound_prefixes.splitlines() | map('trim') | reject('equalto','') | list) %}
 ip prefix-list {{ inbound_pl_name }} seq {{ loop.index * 5 }} permit {{ prefix }}
 {% endfor %}
 {% endif %}
 
-{# ---- Outbound prefix-list (DYN only) ---- #}
 {% if routing_type | default('dynamic') == 'dynamic'
       and outbound_pl_name is defined and outbound_pl_name | length > 0
       and outbound_prefixes is defined and outbound_prefixes | length > 0 %}
-{% set out_lines = outbound_prefixes.splitlines() | map('trim') | reject('equalto','') | list %}
-{% for prefix in out_lines %}
+{% for prefix in (outbound_prefixes.splitlines() | map('trim') | reject('equalto','') | list) %}
 ip prefix-list {{ outbound_pl_name }} seq {{ loop.index * 5 }} permit {{ prefix }}
 {% endfor %}
 {% endif %}
 
-{# ---- Route-maps (DYN only) ---- #}
 {% if routing_type | default('dynamic') == 'dynamic'
       and inbound_rm_name is defined and inbound_rm_name | length > 0
       and inbound_pl_name is defined and inbound_pl_name | length > 0 %}
@@ -105,58 +99,57 @@ route-map {{ outbound_rm_name }} permit 10
  match ip address prefix-list {{ outbound_pl_name }}
 {% endif %}
 
-{# ---- CSR_LIST prefix-list entries for each local network (BOTH modes) ---- #}
+{# ---- CSR_LIST prefix-list — one entry per local network (BOTH modes) ---- #}
 {% if local_networks is defined and local_networks | length > 0 %}
-{% set net_lines = local_networks.splitlines() | map('trim') | reject('equalto','') | list %}
-{% for n in net_lines %}
+{% for n in (local_networks.splitlines() | map('trim') | reject('equalto','') | list) %}
 {%   set net  = n.split()[0] %}
 {%   set msk  = n.split()[1] %}
-{%   set bits = msk.split('.') | map('int') | sum_bits %}
+{%   set bits = _octet_bits[msk.split('.')[0]]
+              + _octet_bits[msk.split('.')[1]]
+              + _octet_bits[msk.split('.')[2]]
+              + _octet_bits[msk.split('.')[3]] %}
 ip prefix-list {{ csr_pl_name | default('CSR_LIST') }} seq {{ (pl_next_seq | int) + (loop.index0 * 5) }} permit {{ net }}/{{ bits }}{% if csr_pl_lege is defined and csr_pl_lege | length > 0 %} {{ csr_pl_lege }}{% endif %}
 
 {% endfor %}
 {% endif %}
 
-{# ---- BGP — always emit when local_networks set, plus full neighbor in dynamic mode ---- #}
+{# ---- BGP — always when local_networks is set; plus neighbor in dynamic mode ---- #}
 {% set want_bgp = (routing_type == 'dynamic') or (local_networks is defined and local_networks | length > 0) %}
 {% if want_bgp %}
 router bgp {{ local_asn | default(398957) }}
  bgp log-neighbor-changes
-{%   if routing_type | default('dynamic') == 'dynamic' %}
+{% if routing_type | default('dynamic') == 'dynamic' %}
  neighbor {{ bgp_neighbor_ip }} remote-as {{ remote_asn }}
  neighbor {{ bgp_neighbor_ip }} description BGP_TO_{{ safe_desc }}
  neighbor {{ bgp_neighbor_ip }} update-source Tunnel{{ tunnel_id }}
  neighbor {{ bgp_neighbor_ip }} timers 10 30 30
  neighbor {{ bgp_neighbor_ip }} ebgp-multihop 10
-{%     if bgp_password is defined and bgp_password | length > 0 %}
+{% if bgp_password is defined and bgp_password | length > 0 %}
  neighbor {{ bgp_neighbor_ip }} password {{ bgp_password }}
-{%     endif %}
-{%   endif %}
+{% endif %}
+{% endif %}
  address-family ipv4
-{%   if local_networks is defined and local_networks | length > 0 %}
-{%     set net_lines = local_networks.splitlines() | map('trim') | reject('equalto','') | list %}
-{%     for n in net_lines %}
+{% if local_networks is defined and local_networks | length > 0 %}
+{% for n in (local_networks.splitlines() | map('trim') | reject('equalto','') | list) %}
   network {{ n.split()[0] }} mask {{ n.split()[1] }}
-{%     endfor %}
-{%   endif %}
-{%   if routing_type | default('dynamic') == 'dynamic' %}
+{% endfor %}
+{% endif %}
+{% if routing_type | default('dynamic') == 'dynamic' %}
   neighbor {{ bgp_neighbor_ip }} activate
   neighbor {{ bgp_neighbor_ip }} soft-reconfiguration inbound
-{%     if inbound_rm_name is defined and inbound_rm_name | length > 0 %}
+{% if inbound_rm_name is defined and inbound_rm_name | length > 0 %}
   neighbor {{ bgp_neighbor_ip }} route-map {{ inbound_rm_name }} in
-{%     endif %}
-{%     if outbound_rm_name is defined and outbound_rm_name | length > 0 %}
+{% endif %}
+{% if outbound_rm_name is defined and outbound_rm_name | length > 0 %}
   neighbor {{ bgp_neighbor_ip }} route-map {{ outbound_rm_name }} out
-{%     endif %}
-{%   endif %}
+{% endif %}
+{% endif %}
  exit-address-family
 {% endif %}
 
-{# ---- Static routes (only in static mode) ---- #}
-{% if routing_type == 'static'
-      and local_networks is defined and local_networks | length > 0 %}
-{% set net_lines = local_networks.splitlines() | map('trim') | reject('equalto','') | list %}
-{% for n in net_lines %}
+{# ---- Static routes (static mode only) ---- #}
+{% if routing_type == 'static' and local_networks is defined and local_networks | length > 0 %}
+{% for n in (local_networks.splitlines() | map('trim') | reject('equalto','') | list) %}
 ip route {{ n.split()[0] }} {{ n.split()[1] }} Tunnel{{ tunnel_id }} name {{ safe_desc }}_NET{{ loop.index }}
 {% endfor %}
 {% endif %}
