@@ -3,6 +3,60 @@
   hosts: all
   gather_facts: false
 
+  pre_tasks:
+    - name: Validate routing_type
+      ansible.builtin.assert:
+        that:
+          - routing_type is defined
+          - routing_type in ['dynamic', 'static']
+        fail_msg: "routing_type must be 'dynamic' or 'static' (got: {{ routing_type | default('<undefined>') }})"
+
+    - name: Validate tunnel_id
+      ansible.builtin.assert:
+        that:
+          - tunnel_id is defined
+          - (tunnel_id | int) > 0
+          - (tunnel_id | int) < 2147483648
+        fail_msg: "tunnel_id must be a positive integer"
+
+    - name: Validate tunnel_desc
+      ansible.builtin.assert:
+        that:
+          - tunnel_desc is defined
+          - tunnel_desc | length > 0
+          - tunnel_desc | length <= 64
+        fail_msg: "tunnel_desc must be 1..64 characters"
+
+    - name: Notice when tunnel_desc contains whitespace
+      ansible.builtin.debug:
+        msg: >
+          tunnel_desc contains whitespace; the template will use underscores
+          for IOS identifiers (e.g. 'peer name', 'ip route ... name').
+          The free-text 'description' lines keep the original value.
+      when: tunnel_desc is search('\s')
+
+    - name: Validate BGP fields when routing_type=dynamic
+      ansible.builtin.assert:
+        that:
+          - bgp_neighbor_ip is defined
+          - bgp_neighbor_ip | length > 0
+          - remote_asn is defined
+          - (remote_asn | int) > 0
+        fail_msg: >
+          routing_type=dynamic requires 'bgp_neighbor_ip' and 'remote_asn'.
+          Re-launch and fill those BGP fields.
+      when: routing_type == 'dynamic'
+
+    - name: Validate local_networks when routing_type=static
+      ansible.builtin.assert:
+        that:
+          - local_networks is defined
+          - local_networks | length > 0
+        fail_msg: >
+          routing_type=static requires at least one entry in 'local_networks'
+          (one 'NETWORK MASK' pair per line, e.g. '10.198.205.0 255.255.255.0').
+      when: routing_type == 'static'
+
   tasks:
     - name: Push generated config
       cisco.ios.ios_config:
