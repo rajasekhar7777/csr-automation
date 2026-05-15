@@ -1,5 +1,10 @@
 {# ======= IKEv2 / IPsec route-based VPN tunnel ======= #}
 
+{# Sanitised version of tunnel_desc for IOS identifiers (peer name, ip-route name, etc.).
+   Replaces any whitespace with underscores. tunnel_desc stays untouched for free-text
+   'description' lines on the interface (which accept spaces). #}
+{% set safe_desc = tunnel_desc | regex_replace('\\s+', '_') %}
+
 {# ---- Crypto Foundation ---- #}
 crypto ikev2 proposal azure-proposal-VNG
  encryption aes-cbc-256 aes-cbc-128
@@ -10,7 +15,7 @@ crypto ikev2 policy azure-policy-VNG
  proposal azure-proposal-VNG
 
 crypto ikev2 keyring KEYRING_T{{ tunnel_id }}
- peer {{ tunnel_desc }}
+ peer {{ safe_desc }}
   address {{ remote_peer_ip }}
   pre-shared-key {{ vpn_psk }}
 
@@ -89,7 +94,7 @@ route-map {{ outbound_rm_name }} permit 10
 router bgp {{ local_asn | default(398957) }}
  bgp log-neighbor-changes
  neighbor {{ bgp_neighbor_ip }} remote-as {{ remote_asn }}
- neighbor {{ bgp_neighbor_ip }} description BGP_TO_{{ tunnel_desc }}
+ neighbor {{ bgp_neighbor_ip }} description BGP_TO_{{ safe_desc }}
  neighbor {{ bgp_neighbor_ip }} update-source Tunnel{{ tunnel_id }}
  neighbor {{ bgp_neighbor_ip }} timers 10 30 30
  neighbor {{ bgp_neighbor_ip }} ebgp-multihop 10
@@ -119,7 +124,7 @@ router bgp {{ local_asn | default(398957) }}
 {% if local_networks is defined and local_networks | length > 0 %}
 {% set net_lines = local_networks.splitlines() | map('trim') | reject('equalto','') | list %}
 {% for n in net_lines %}
-ip route {{ n.split()[0] }} {{ n.split()[1] }} Tunnel{{ tunnel_id }} name {{ tunnel_desc }}_NET{{ loop.index }}
+ip route {{ n.split()[0] }} {{ n.split()[1] }} Tunnel{{ tunnel_id }} name {{ safe_desc }}_NET{{ loop.index }}
 {% endfor %}
 {% endif %}
 
