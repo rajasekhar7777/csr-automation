@@ -5,7 +5,6 @@
   gather_facts: false
 
   pre_tasks:
-
     - name: Validate routing_type
       ansible.builtin.assert:
         that:
@@ -35,7 +34,74 @@
         fail_msg: "routing_type=static requires local_networks (one 'NETWORK MASK' per line)"
       when: routing_type == 'static'
 
-    # ── Derive peer /30 host (e.g. .5 ↔ .6, .9 ↔ .10) ─────────────────
+    # ---------- csr_pl_lege handling ----------
+
+    - name: Validate csr_pl_lege format — blank OR 'le N' (N=0..32)
+      ansible.builtin.assert:
+        that:
+          - >
+            (csr_pl_lege is not defined)
+            or ((csr_pl_lege | trim | length) == 0)
+            or ((csr_pl_lege | trim) is match('^le\s+([0-9]|[12][0-9]|3[0-2])$'))
+        fail_msg: >
+          'csr_pl_lege' must be blank OR exactly 'le N' where N is 0..32.
+          Valid: 'le 24', 'le 30', 'le 32', ''.
+          NOT valid: 'le 33', 'ge 24 le 32', 'permit ...', '32'.
+
+    - name: Extract numeric N from csr_pl_lege (-1 if blank)
+      ansible.builtin.set_fact:
+        pl_le_value: >-
+          {{ (csr_pl_lege | trim | regex_replace('^le\s+', '') | int)
+             if (csr_pl_lege is defined and (csr_pl_lege | trim | length) > 0)
+             else -1 }}
+
+    - name: Compute /M (bits) for each entry in local_networks
+      ansible.builtin.set_fact:
+        pl_mask_bits: >-
+          {%- set octet = {'0':0,'128':1,'192':2,'224':3,'240':4,'248':5,'252':6,'254':7,'255':8} -%}
+          {%- set out = [] -%}
+          {%- for line in (local_networks | default('')).splitlines() -%}
+            {%- set p = line.split() -%}
+            {%- if (p | length) >= 2 -%}
+              {%- set bits = 0 -%}
+              {%- for o in p[1].split('.') -%}
+                {%- set bits = bits + octet.get(o, 0) -%}
+              {%- endfor -%}
+              {%- set _ = out.append(bits) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+      when: routing_type == 'static'
+
+    - name: Enforce 'le N' >= /M for every local_network (static mode)
+      ansible.builtin.assert:
+        that:
+          - (pl_le_value | int) >= (item | int)
+        fail_msg: >
+          csr_pl_lege 'le {{ pl_le_value }}' is invalid: must be >=
+          the prefix length of every network. Offending /M = /{{ item }}.
+          (Cisco requires M <= X <= 32 in 'permit A.B.C.D/M le X'.)
+      loop: "{{ pl_mask_bits | default([]) }}"
+      when:
+        - routing_type == 'static'
+        - (pl_le_value | int) >= 0
+
+    - name: Enforce 'le N' >= /M of csr_pl_entry (dynamic mode, when used)
+      ansible.builtin.assert:
+        that:
+          - (pl_le_value | int) >= ((csr_pl_entry | regex_replace('^.*/', '')) | int)
+        fail_msg: >
+          csr_pl_lege 'le {{ pl_le_value }}' must be >= csr_pl_entry's /M
+          ({{ csr_pl_entry }}).
+      when:
+        - routing_type == 'dynamic'
+        - (pl_le_value | int) >= 0
+        - csr_pl_entry is defined
+        - (csr_pl_entry | default('') | length) > 0
+        - "'/' in (csr_pl_entry | default(''))"
+
+    # ---------- derived facts ----------
+
     - name: Compute peer tunnel host
       ansible.builtin.set_fact:
         tunnel_peer_ip: >-
@@ -48,10 +114,9 @@
       ansible.builtin.set_fact:
         effective_sla_target: "{{ sla_target_ip if (sla_target_ip is defined and sla_target_ip | length > 0) else tunnel_peer_ip }}"
 
-    # ── Read current CSR_LIST to find next free seq ───────────────────
     - name: Read current prefix-list state
       cisco.ios.ios_command:
-        commands: "show ip prefix-list {{ csr_pl_name | default('CSR_LIST') }}"
+        commands: "show ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }}"
       register: pl_show
       failed_when: false
 
@@ -72,12 +137,13 @@
         msg:
           tunnel_peer_ip: "{{ tunnel_peer_ip }}"
           effective_sla_target: "{{ effective_sla_target }}"
-          csr_pl_name: "{{ csr_pl_name | default('CSR_LIST') }}"
+          csr_pl_name: "{{ csr_pl_name | default('CSR_LIST', true) }}"
           pl_existing_seqs: "{{ pl_existing_seqs }}"
           pl_next_seq: "{{ pl_next_seq }}"
+          pl_le_value: "{{ pl_le_value }}"
+          pl_mask_bits: "{{ pl_mask_bits | default([]) }}"
 
   tasks:
-
     - name: Push generated config
       cisco.ios.ios_config:
         src: templates/add_tunnel.j2
@@ -94,7 +160,6 @@
       when: cfg.changed
 
   post_tasks:
-
     - name: Verify — running-config BGP section
       cisco.ios.ios_command:
         commands:
