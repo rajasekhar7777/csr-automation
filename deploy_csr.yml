@@ -1,63 +1,83 @@
+
 ---
 - name: Deploy IKEv2 route-based VPN tunnel on Cisco CSR
   hosts: all
   gather_facts: false
 
   pre_tasks:
+
     - name: Validate routing_type
       ansible.builtin.assert:
         that:
           - routing_type is defined
           - routing_type in ['dynamic', 'static']
-        fail_msg: "routing_type must be 'dynamic' or 'static' (got: {{ routing_type | default('<undefined>') }})"
+        fail_msg: "routing_type must be 'dynamic' or 'static'"
 
-    - name: Validate tunnel_id
+    - name: Validate tunnel_id, tunnel_desc
       ansible.builtin.assert:
         that:
-          - tunnel_id is defined
-          - (tunnel_id | int) > 0
-          - (tunnel_id | int) < 2147483648
-        fail_msg: "tunnel_id must be a positive integer"
-
-    - name: Validate tunnel_desc
-      ansible.builtin.assert:
-        that:
-          - tunnel_desc is defined
-          - tunnel_desc | length > 0
-          - tunnel_desc | length <= 64
-        fail_msg: "tunnel_desc must be 1..64 characters"
-
-    - name: Notice when tunnel_desc contains whitespace
-      ansible.builtin.debug:
-        msg: >
-          tunnel_desc contains whitespace; the template will use underscores
-          for IOS identifiers (e.g. 'peer name', 'ip route ... name').
-          The free-text 'description' lines keep the original value.
-      when: tunnel_desc is search('\s')
+          - tunnel_id is defined and (tunnel_id | int) > 0
+          - tunnel_desc is defined and (tunnel_desc | length) > 0
+        fail_msg: "tunnel_id and tunnel_desc are required"
 
     - name: Validate BGP fields when routing_type=dynamic
       ansible.builtin.assert:
         that:
-          - bgp_neighbor_ip is defined
-          - bgp_neighbor_ip | length > 0
-          - remote_asn is defined
-          - (remote_asn | int) > 0
-        fail_msg: >
-          routing_type=dynamic requires 'bgp_neighbor_ip' and 'remote_asn'.
-          Re-launch and fill those BGP fields.
+          - bgp_neighbor_ip is defined and (bgp_neighbor_ip | length) > 0
+          - remote_asn is defined and (remote_asn | int) > 0
+        fail_msg: "routing_type=dynamic requires bgp_neighbor_ip and remote_asn"
       when: routing_type == 'dynamic'
 
     - name: Validate local_networks when routing_type=static
       ansible.builtin.assert:
         that:
-          - local_networks is defined
-          - local_networks | length > 0
-        fail_msg: >
-          routing_type=static requires at least one entry in 'local_networks'
-          (one 'NETWORK MASK' pair per line, e.g. '10.198.205.0 255.255.255.0').
+          - local_networks is defined and (local_networks | length) > 0
+        fail_msg: "routing_type=static requires local_networks (one 'NETWORK MASK' per line)"
       when: routing_type == 'static'
 
+    # ── Derive peer /30 host (e.g. .5 ↔ .6, .9 ↔ .10) ─────────────────
+    - name: Compute peer tunnel host
+      ansible.builtin.set_fact:
+        tunnel_peer_ip: >-
+          {%- set parts = tunnel_local_ip.split('.') -%}
+          {%- set last  = parts[-1] | int -%}
+          {%- set off   = 1 if (last % 4) == 1 else -1 -%}
+          {{ parts[0:3] | join('.') }}.{{ last + off }}
+
+    - name: Decide effective IP-SLA target (override if survey provides one)
+      ansible.builtin.set_fact:
+        effective_sla_target: "{{ sla_target_ip if (sla_target_ip is defined and sla_target_ip | length > 0) else tunnel_peer_ip }}"
+
+    # ── Read current CSR_LIST to find next free seq ───────────────────
+    - name: Read current prefix-list state
+      cisco.ios.ios_command:
+        commands: "show ip prefix-list {{ csr_pl_name | default('CSR_LIST') }}"
+      register: pl_show
+      failed_when: false
+
+    - name: Parse existing seq numbers (if list exists)
+      ansible.builtin.set_fact:
+        pl_existing_seqs: >-
+          {{
+            (pl_show.stdout[0] | default('') | regex_findall('seq\s+(\d+)'))
+            | map('int') | list
+          }}
+
+    - name: Compute starting next seq (multiples of 5)
+      ansible.builtin.set_fact:
+        pl_next_seq: "{{ ((pl_existing_seqs + [0]) | max | int) + 5 }}"
+
+    - name: Show derived facts (debug)
+      ansible.builtin.debug:
+        msg:
+          tunnel_peer_ip: "{{ tunnel_peer_ip }}"
+          effective_sla_target: "{{ effective_sla_target }}"
+          csr_pl_name: "{{ csr_pl_name | default('CSR_LIST') }}"
+          pl_existing_seqs: "{{ pl_existing_seqs }}"
+          pl_next_seq: "{{ pl_next_seq }}"
+
   tasks:
+
     - name: Push generated config
       cisco.ios.ios_config:
         src: templates/add_tunnel.j2
@@ -72,3 +92,27 @@
       ansible.builtin.debug:
         var: cfg.commands
       when: cfg.changed
+
+  post_tasks:
+
+    - name: Verify — running-config BGP section
+      cisco.ios.ios_command:
+        commands:
+          - "show running-config | section bgp"
+      register: vfy_bgp
+      changed_when: false
+
+    - name: Verify — interface brief
+      cisco.ios.ios_command:
+        commands:
+          - "show ip interface brief"
+      register: vfy_intf
+      changed_when: false
+
+    - name: Print verification — BGP section
+      ansible.builtin.debug:
+        msg: "{{ vfy_bgp.stdout[0].splitlines() }}"
+
+    - name: Print verification — interfaces
+      ansible.builtin.debug:
+        msg: "{{ vfy_intf.stdout[0].splitlines() }}"
