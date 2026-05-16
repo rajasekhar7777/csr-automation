@@ -107,12 +107,12 @@
           {%- set lines = (pl_show.stdout[0] | default('')).splitlines() -%}
           {%- set seqs = [] -%}
           {%- for e in (ln_entries | default([])) -%}
-          {%-   set needle = e.net ~ '/' ~ e.bits -%}
+          {%-   set needle = e.net ~ '/' ~ (e.bits | string) -%}
           {%-   for ln in lines -%}
           {%-     if needle in ln -%}
-          {%-       set m = ln | regex_search('seq\s+(\d+)', '\1') -%}
-          {%-       if m and (m[0] not in seqs) -%}
-          {%-         set _ = seqs.append(m[0]) -%}
+          {%-       set found = ln | regex_findall('seq\s+(\d+)') -%}
+          {%-       if (found | length) > 0 and (found[0] not in seqs) -%}
+          {%-         set _ = seqs.append(found[0]) -%}
           {%-       endif -%}
           {%-     endif -%}
           {%-   endfor -%}
