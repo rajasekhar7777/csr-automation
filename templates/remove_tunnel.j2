@@ -49,9 +49,10 @@ no {{ line }}
 {% endif %}
 
 {# ---- Static routes added by deploy (static mode only) ---- #}
+{# ---- Static routes added by deploy (static mode only) ---- #}
 {% if routing_type == 'static' and ln_entries is defined and ln_entries | length > 0 %}
 {% for e in ln_entries %}
-no ip route {{ e.net }} {{ e.mask }} Tunnel{{ tunnel_id }}
+no ip route {{ e.net }} {{ e.mask }} Tunnel{{ tunnel_id }} name {{ safe_desc }}_NET{{ loop.index }}
 {% endfor %}
 {% endif %}
 
