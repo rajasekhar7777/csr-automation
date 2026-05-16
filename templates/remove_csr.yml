@@ -4,6 +4,7 @@
   gather_facts: false
 
   pre_tasks:
+    # ---------- Basic input validation ----------
     - name: Validate routing_type
       ansible.builtin.assert:
         that:
@@ -18,7 +19,48 @@
           - tunnel_desc is defined and (tunnel_desc | length) > 0
         fail_msg: "tunnel_id and tunnel_desc are required"
 
-    # ---- Normalize local_networks the same way the deploy template does ----
+    - name: Validate remote_peer_ip
+      ansible.builtin.assert:
+        that:
+          - remote_peer_ip is defined and (remote_peer_ip | length) > 0
+        fail_msg: "remote_peer_ip is required (must match the tunnel's 'tunnel destination')"
+
+    # ---------- SAFETY GATE 1: confirm_tunnel_id must equal tunnel_id ----------
+    - name: SAFETY — operator must re-type tunnel_id in confirm_tunnel_id
+      ansible.builtin.assert:
+        that:
+          - confirm_tunnel_id is defined
+          - (confirm_tunnel_id | string) == (tunnel_id | string)
+        fail_msg: >
+          REFUSING TO PROCEED. 'confirm_tunnel_id' must equal 'tunnel_id'
+          (tunnel_id={{ tunnel_id }}, confirm_tunnel_id={{ confirm_tunnel_id | default('<unset>') }}).
+          This guards against accidentally removing the wrong tunnel.
+
+    # ---------- SAFETY GATE 2: verify the tunnel actually exists ----------
+    - name: SAFETY — read running-config for Tunnel{{ tunnel_id }}
+      cisco.ios.ios_command:
+        commands: "show running-config interface Tunnel{{ tunnel_id }}"
+      register: tun_exists
+      failed_when: false
+
+    - name: SAFETY — abort if Tunnel{{ tunnel_id }} is not present
+      ansible.builtin.assert:
+        that:
+          - "'interface Tunnel' ~ (tunnel_id | string) in (tun_exists.stdout[0] | default(''))"
+        fail_msg: >
+          Tunnel{{ tunnel_id }} does not exist on this device. Nothing to remove.
+
+    # ---------- SAFETY GATE 3: remote_peer_ip must match tunnel destination ----------
+    - name: SAFETY — abort if remote_peer_ip does not match tunnel destination
+      ansible.builtin.assert:
+        that:
+          - "'tunnel destination ' ~ remote_peer_ip in (tun_exists.stdout[0] | default(''))"
+        fail_msg: >
+          remote_peer_ip mismatch. Survey says {{ remote_peer_ip }}, but
+          Tunnel{{ tunnel_id }} has a different 'tunnel destination' configured.
+          Refusing to proceed.
+
+    # ---------- Normalize local_networks (same logic as deploy template) ----------
     - name: Build ln_entries (net, mask, bits) from local_networks
       ansible.builtin.set_fact:
         ln_entries: >-
@@ -52,14 +94,14 @@
           {%- endfor -%}
           {{ out }}
 
-    # ---- Find this tunnel's seqs inside CSR_LIST so we delete ONLY those ----
-    - name: Read current CSR_LIST
+    # ---------- Find ONLY this tunnel's seqs inside CSR_LIST ----------
+    - name: Read current CSR_LIST entries (from running-config)
       cisco.ios.ios_command:
         commands: "show running-config | include ^ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} "
       register: pl_show
       failed_when: false
 
-    - name: Compute pl_remove_seqs (seqs whose 'permit NET/BITS' matches our ln_entries)
+    - name: Compute pl_remove_seqs (seqs whose 'permit NET/BITS' matches ln_entries)
       ansible.builtin.set_fact:
         pl_remove_seqs: >-
           {%- set lines = (pl_show.stdout[0] | default('')).splitlines() -%}
@@ -82,6 +124,9 @@
         msg:
           tunnel_id: "{{ tunnel_id }}"
           tunnel_desc: "{{ tunnel_desc }}"
+          remote_peer_ip: "{{ remote_peer_ip }}"
+          routing_type: "{{ routing_type }}"
+          bgp_neighbor_ip: "{{ bgp_neighbor_ip | default('<none>') }}"
           ln_entries: "{{ ln_entries }}"
           csr_pl_name: "{{ csr_pl_name | default('CSR_LIST', true) }}"
           pl_remove_seqs: "{{ pl_remove_seqs }}"
