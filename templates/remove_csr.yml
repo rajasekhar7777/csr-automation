@@ -1,0 +1,137 @@
+---
+- name: Remove IKEv2 route-based VPN tunnel from Cisco CSR
+  hosts: all
+  gather_facts: false
+
+  pre_tasks:
+    - name: Validate routing_type
+      ansible.builtin.assert:
+        that:
+          - routing_type is defined
+          - routing_type in ['dynamic', 'static']
+        fail_msg: "routing_type must be 'dynamic' or 'static'"
+
+    - name: Validate tunnel_id, tunnel_desc
+      ansible.builtin.assert:
+        that:
+          - tunnel_id is defined and (tunnel_id | int) > 0
+          - tunnel_desc is defined and (tunnel_desc | length) > 0
+        fail_msg: "tunnel_id and tunnel_desc are required"
+
+    # ---- Normalize local_networks the same way the deploy template does ----
+    - name: Build ln_entries (net, mask, bits) from local_networks
+      ansible.builtin.set_fact:
+        ln_entries: >-
+          {%- set octet = {'0':0,'128':1,'192':2,'224':3,'240':4,'248':5,'252':6,'254':7,'255':8} -%}
+          {%- set out = [] -%}
+          {%- for raw in (local_networks | default('')).splitlines() -%}
+          {%-   set line = raw | trim -%}
+          {%-   if line | length > 0 -%}
+          {%-     if '/' in line and (line.split() | length) == 1 -%}
+          {%-       set net  = line.split('/')[0] -%}
+          {%-       set bits = line.split('/')[1] | int -%}
+          {%-       set _full = (bits // 8) -%}
+          {%-       set _rem  = (bits %  8) -%}
+          {%-       set _tab  = {0:'0',1:'128',2:'192',3:'224',4:'240',5:'248',6:'252',7:'254',8:'255'} -%}
+          {%-       set parts = [] -%}
+          {%-       for i in range(4) -%}
+          {%-         if i < _full %}{%- set _ = parts.append('255') -%}
+          {%-         elif i == _full %}{%- set _ = parts.append(_tab[_rem]) -%}
+          {%-         else %}{%- set _ = parts.append('0') -%}{%- endif -%}
+          {%-       endfor -%}
+          {%-       set _ = out.append({'net': net, 'mask': parts | join('.'), 'bits': bits}) -%}
+          {%-     elif (line.split() | length) >= 2 -%}
+          {%-       set p = line.split() -%}
+          {%-       set mo = p[1].split('.') -%}
+          {%-       if (mo | length) == 4 -%}
+          {%-         set bits = octet.get(mo[0],0)+octet.get(mo[1],0)+octet.get(mo[2],0)+octet.get(mo[3],0) -%}
+          {%-         set _ = out.append({'net': p[0], 'mask': p[1], 'bits': bits}) -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    # ---- Find this tunnel's seqs inside CSR_LIST so we delete ONLY those ----
+    - name: Read current CSR_LIST
+      cisco.ios.ios_command:
+        commands: "show running-config | include ^ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} "
+      register: pl_show
+      failed_when: false
+
+    - name: Compute pl_remove_seqs (seqs whose 'permit NET/BITS' matches our ln_entries)
+      ansible.builtin.set_fact:
+        pl_remove_seqs: >-
+          {%- set lines = (pl_show.stdout[0] | default('')).splitlines() -%}
+          {%- set seqs = [] -%}
+          {%- for e in (ln_entries | default([])) -%}
+          {%-   set needle = e.net ~ '/' ~ e.bits -%}
+          {%-   for ln in lines -%}
+          {%-     if needle in ln -%}
+          {%-       set m = ln | regex_search('seq\s+(\d+)', '\1') -%}
+          {%-       if m and (m[0] not in seqs) -%}
+          {%-         set _ = seqs.append(m[0]) -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {{ seqs }}
+
+    - name: Show what will be removed (debug)
+      ansible.builtin.debug:
+        msg:
+          tunnel_id: "{{ tunnel_id }}"
+          tunnel_desc: "{{ tunnel_desc }}"
+          ln_entries: "{{ ln_entries }}"
+          csr_pl_name: "{{ csr_pl_name | default('CSR_LIST', true) }}"
+          pl_remove_seqs: "{{ pl_remove_seqs }}"
+
+  tasks:
+    - name: Push removal config
+      cisco.ios.ios_config:
+        src: templates/remove_tunnel.j2
+      register: cfg
+
+    - name: Save startup-config
+      cisco.ios.ios_command:
+        commands: write memory
+      when: cfg.changed
+
+    - name: Show removed lines
+      ansible.builtin.debug:
+        var: cfg.commands
+      when: cfg.changed
+
+  post_tasks:
+    - name: Verify — Tunnel{{ tunnel_id }} is gone
+      cisco.ios.ios_command:
+        commands:
+          - "show ip interface brief | include Tunnel{{ tunnel_id }}"
+      register: vfy_intf
+      changed_when: false
+
+    - name: Verify — running-config BGP section
+      cisco.ios.ios_command:
+        commands:
+          - "show running-config | section bgp"
+      register: vfy_bgp
+      changed_when: false
+
+    - name: Verify — CSR_LIST state
+      cisco.ios.ios_command:
+        commands:
+          - "show ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }}"
+      register: vfy_pl
+      changed_when: false
+
+    - name: Print verification — interface check (should be empty)
+      ansible.builtin.debug:
+        msg: "{{ vfy_intf.stdout[0].splitlines() }}"
+
+    - name: Print verification — BGP section
+      ansible.builtin.debug:
+        msg: "{{ vfy_bgp.stdout[0].splitlines() }}"
+
+    - name: Print verification — CSR_LIST after removal
+      ansible.builtin.debug:
+        msg: "{{ vfy_pl.stdout[0].splitlines() }}"
