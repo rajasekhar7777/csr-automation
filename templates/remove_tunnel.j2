@@ -1,5 +1,5 @@
-{# ======= IKEv2 / IPsec route-based VPN tunnel — REMOVAL ======= #}
-{# BGP cleanup is handled by the playbook, NOT this template.    #}
+{# ======= IKEv2 / IPsec route-based VPN tunnel — REMOVAL (safe items only) ======= #}
+{# BGP, CSR_LIST entries, and static routes are handled by the playbook tasks.    #}
 
 {% set safe_desc = tunnel_desc | regex_replace('\\s+', '_') %}
 {% set effective_acl_name = acl_name if (acl_name is defined and acl_name | length > 0) else safe_desc %}
@@ -15,7 +15,7 @@ no ip sla schedule {{ tunnel_id }}
 no ip sla {{ tunnel_id }}
 no track {{ tunnel_id }}
 
-{# ---- Crypto stack (order: ipsec profile → ikev2 profile → keyring) ---- #}
+{# ---- Crypto stack ---- #}
 no crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
 no crypto ikev2 profile PROF_T{{ tunnel_id }}
 no crypto ikev2 keyring KEYRING_T{{ tunnel_id }}
@@ -40,18 +40,4 @@ no route-map {{ inbound_rm_name }}
 {% if outbound_rm_name is defined and outbound_rm_name | length > 0 %}
 no route-map {{ outbound_rm_name }}
 {% endif %}
-{% endif %}
-
-{# ---- CSR_LIST — emit FULL line so IOS-XE accepts the 'no' ---- #}
-{% if pl_remove_lines is defined and (pl_remove_lines | length) > 0 %}
-{% for line in pl_remove_lines %}
-no {{ line }}
-{% endfor %}
-{% endif %}
-
-{# ---- Static routes added by deploy (static mode only) ---- #}
-{% if routing_type == 'static' and ln_entries is defined and ln_entries | length > 0 %}
-{% for e in ln_entries %}
-no ip route {{ e.net }} {{ e.mask }} Tunnel{{ tunnel_id }} name {{ safe_desc }}_NET{{ loop.index }}
-{% endfor %}
 {% endif %}
