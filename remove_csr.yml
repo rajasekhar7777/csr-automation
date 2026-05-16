@@ -25,7 +25,7 @@
           - remote_peer_ip is defined and (remote_peer_ip | length) > 0
         fail_msg: "remote_peer_ip is required (must match the tunnel's 'tunnel destination')"
 
-    # ---------- SAFETY GATE 1: confirm_tunnel_id must equal tunnel_id ----------
+    # ---------- SAFETY GATE 1 ----------
     - name: SAFETY — operator must re-type tunnel_id in confirm_tunnel_id
       ansible.builtin.assert:
         that:
@@ -34,9 +34,8 @@
         fail_msg: >
           REFUSING TO PROCEED. 'confirm_tunnel_id' must equal 'tunnel_id'
           (tunnel_id={{ tunnel_id }}, confirm_tunnel_id={{ confirm_tunnel_id | default('<unset>') }}).
-          This guards against accidentally removing the wrong tunnel.
 
-    # ---------- SAFETY GATE 2: verify the tunnel actually exists ----------
+    # ---------- SAFETY GATE 2 ----------
     - name: SAFETY — read running-config for Tunnel{{ tunnel_id }}
       cisco.ios.ios_command:
         commands: "show running-config interface Tunnel{{ tunnel_id }}"
@@ -50,17 +49,16 @@
         fail_msg: >
           Tunnel{{ tunnel_id }} does not exist on this device. Nothing to remove.
 
-    # ---------- SAFETY GATE 3: remote_peer_ip must match tunnel destination ----------
+    # ---------- SAFETY GATE 3 ----------
     - name: SAFETY — abort if remote_peer_ip does not match tunnel destination
       ansible.builtin.assert:
         that:
           - "'tunnel destination ' ~ remote_peer_ip in (tun_exists.stdout[0] | default(''))"
         fail_msg: >
           remote_peer_ip mismatch. Survey says {{ remote_peer_ip }}, but
-          Tunnel{{ tunnel_id }} has a different 'tunnel destination' configured.
-          Refusing to proceed.
+          Tunnel{{ tunnel_id }} has a different 'tunnel destination'. Refusing to proceed.
 
-    # ---------- Normalize local_networks (same logic as deploy template) ----------
+    # ---------- Normalize local_networks ----------
     - name: Build ln_entries (net, mask, bits) from local_networks
       ansible.builtin.set_fact:
         ln_entries: >-
@@ -94,14 +92,14 @@
           {%- endfor -%}
           {{ out }}
 
-    # ---------- Find ONLY this tunnel's CSR_LIST lines (full lines, for clean 'no ...') ----------
+    # ---------- Find this tunnel's CSR_LIST lines ----------
     - name: Read current CSR_LIST entries (from running-config)
       cisco.ios.ios_command:
         commands: "show running-config | include ^ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} "
       register: pl_show
       failed_when: false
 
-    - name: Compute pl_remove_lines (full CSR_LIST lines whose prefix matches ln_entries)
+    - name: Compute pl_remove_lines (full CSR_LIST lines matching ln_entries)
       ansible.builtin.set_fact:
         pl_remove_lines: >-
           {%- set lines = (pl_show.stdout[0] | default('')).splitlines() -%}
@@ -131,11 +129,12 @@
 
   tasks:
     # ------------------------------------------------------------------
-    # BGP cleanup runs FIRST as independent ios_config tasks.
-    # If the later template push fails halfway, BGP is already clean.
-    # failed_when: false  → safe to re-run; missing items become no-ops.
+    # Each "fragile" cleanup is its own task — failures don't cascade.
+    # Order: BGP first (depends on tunnel), then static routes,
+    # then CSR_LIST, then the template push for the rest.
     # ------------------------------------------------------------------
-    - name: Remove BGP network statements (independent, idempotent)
+
+    - name: Remove BGP network statements
       cisco.ios.ios_config:
         parents:
           - "router bgp {{ local_asn | default(398957) }}"
@@ -145,7 +144,7 @@
       failed_when: false
       when: (ln_entries | default([]) | length) > 0
 
-    - name: Remove BGP neighbor (dynamic mode, independent, idempotent)
+    - name: Remove BGP neighbor (dynamic mode)
       cisco.ios.ios_config:
         parents: ["router bgp {{ local_asn | default(398957) }}"]
         lines: ["no neighbor {{ bgp_neighbor_ip }}"]
@@ -155,11 +154,29 @@
         - bgp_neighbor_ip is defined
         - (bgp_neighbor_ip | length) > 0
 
+    - name: Remove static routes via Tunnel{{ tunnel_id }} (static mode)
+      cisco.ios.ios_config:
+        lines:
+          - "no ip route {{ item.net }} {{ item.mask }} Tunnel{{ tunnel_id }} name {{ (tunnel_desc | regex_replace('\\s+', '_')) }}_NET{{ idx }}"
+      loop: "{{ ln_entries | default([]) }}"
+      loop_control:
+        index_var: idx0
+      vars:
+        idx: "{{ idx0 + 1 }}"
+      failed_when: false
+      when: routing_type == 'static'
+
+    - name: Remove CSR_LIST entries for this tunnel's networks
+      cisco.ios.ios_config:
+        lines: ["no {{ item }}"]
+      loop: "{{ pl_remove_lines | default([]) }}"
+      failed_when: false
+
     # ------------------------------------------------------------------
-    # Main removal — everything else (interface, crypto, ACL, prefix-list,
-    # static routes, IP SLA, track) goes through the template.
+    # Template push for "safe" items: interface, peer route, sla, track,
+    # crypto stack, ACL, dynamic-mode prefix-list/route-map.
     # ------------------------------------------------------------------
-    - name: Push removal config
+    - name: Push removal config (safe items)
       cisco.ios.ios_config:
         src: templates/remove_tunnel.j2
       register: cfg
@@ -167,9 +184,9 @@
     - name: Save startup-config
       cisco.ios.ios_command:
         commands: write memory
-      when: cfg.changed
+      changed_when: true
 
-    - name: Show removed lines
+    - name: Show removed lines (template push)
       ansible.builtin.debug:
         var: cfg.commands
       when: cfg.changed
