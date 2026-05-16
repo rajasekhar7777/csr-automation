@@ -42,10 +42,10 @@ no route-map {{ outbound_rm_name }}
 {% endif %}
 {% endif %}
 
-{# ---- CSR_LIST entries — only seqs that matched THIS tunnel's networks ---- #}
-{% if pl_remove_seqs is defined and (pl_remove_seqs | length) > 0 %}
-{% for seq in pl_remove_seqs %}
-no ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} seq {{ seq }}
+{# ---- CSR_LIST entries — emit full 'no <line>' so IOS-XE accepts it ---- #}
+{% if pl_remove_lines is defined and (pl_remove_lines | length) > 0 %}
+{% for line in pl_remove_lines %}
+no {{ line }}
 {% endfor %}
 {% endif %}
 
