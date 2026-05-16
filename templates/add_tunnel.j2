@@ -9,6 +9,47 @@
   '248':5, '252':6, '254':7, '255':8
 } %}
 
+{# ---- Normalize local_networks → [{net, mask, bits}, ...] (skip malformed) ---- #}
+{% set ln_entries = [] %}
+{% if local_networks is defined and local_networks | length > 0 %}
+{%   for raw in local_networks.splitlines() %}
+{%     set line = raw | trim %}
+{%     if line | length > 0 %}
+{%       if '/' in line and (line.split() | length) == 1 %}
+{#         CIDR form: 10.179.248.0/21 #}
+{%         set net  = line.split('/')[0] %}
+{%         set bits = line.split('/')[1] | int %}
+{#         derive dotted mask from bits for BGP 'network ... mask' #}
+{%         set full_octets = (bits // 8) %}
+{%         set rem         = (bits %  8) %}
+{%         set _table      = {0:'0',1:'128',2:'192',3:'224',4:'240',5:'248',6:'252',7:'254',8:'255'} %}
+{%         set parts = [] %}
+{%         for i in range(4) %}
+{%           if i < full_octets %}{% set _ = parts.append('255') %}
+{%           elif i == full_octets %}{% set _ = parts.append(_table[rem]) %}
+{%           else %}{% set _ = parts.append('0') %}
+{%           endif %}
+{%         endfor %}
+{%         set msk = parts | join('.') %}
+{%         set _ = ln_entries.append({'net': net, 'mask': msk, 'bits': bits}) %}
+{%       elif (line.split() | length) >= 2 %}
+{#         dotted form: 10.179.248.0 255.255.248.0 #}
+{%         set p   = line.split() %}
+{%         set net = p[0] %}
+{%         set msk = p[1] %}
+{%         set mo  = msk.split('.') %}
+{%         if (mo | length) == 4 %}
+{%           set bits = _octet_bits.get(mo[0],0)
+                      + _octet_bits.get(mo[1],0)
+                      + _octet_bits.get(mo[2],0)
+                      + _octet_bits.get(mo[3],0) %}
+{%           set _ = ln_entries.append({'net': net, 'mask': msk, 'bits': bits}) %}
+{%         endif %}
+{%       endif %}
+{%     endif %}
+{%   endfor %}
+{% endif %}
+
 {# ---- Crypto Foundation ---- #}
 crypto ikev2 proposal azure-proposal-VNG
  encryption aes-cbc-256 aes-cbc-128
@@ -100,21 +141,15 @@ route-map {{ outbound_rm_name }} permit 10
 {% endif %}
 
 {# ---- CSR_LIST prefix-list — one entry per local network (BOTH modes) ---- #}
-{% if local_networks is defined and local_networks | length > 0 %}
-{% for n in (local_networks.splitlines() | map('trim') | reject('equalto','') | list) %}
-{%   set net  = n.split()[0] %}
-{%   set msk  = n.split()[1] %}
-{%   set bits = _octet_bits[msk.split('.')[0]]
-              + _octet_bits[msk.split('.')[1]]
-              + _octet_bits[msk.split('.')[2]]
-              + _octet_bits[msk.split('.')[3]] %}
-ip prefix-list {{ csr_pl_name | default('CSR_LIST') }} seq {{ (pl_next_seq | int) + (loop.index0 * 5) }} permit {{ net }}/{{ bits }}{% if csr_pl_lege is defined and csr_pl_lege | length > 0 %} {{ csr_pl_lege }}{% endif %}
+{% if ln_entries | length > 0 %}
+{% for e in ln_entries %}
+ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} seq {{ (pl_next_seq | int) + (loop.index0 * 5) }} permit {{ e.net }}/{{ e.bits }}{% if csr_pl_lege is defined and (csr_pl_lege | trim | length) > 0 %} {{ csr_pl_lege | trim }}{% endif %}
 
 {% endfor %}
 {% endif %}
 
 {# ---- BGP — always when local_networks is set; plus neighbor in dynamic mode ---- #}
-{% set want_bgp = (routing_type == 'dynamic') or (local_networks is defined and local_networks | length > 0) %}
+{% set want_bgp = (routing_type == 'dynamic') or (ln_entries | length > 0) %}
 {% if want_bgp %}
 router bgp {{ local_asn | default(398957) }}
  bgp log-neighbor-changes
@@ -129,11 +164,9 @@ router bgp {{ local_asn | default(398957) }}
 {% endif %}
 {% endif %}
  address-family ipv4
-{% if local_networks is defined and local_networks | length > 0 %}
-{% for n in (local_networks.splitlines() | map('trim') | reject('equalto','') | list) %}
-  network {{ n.split()[0] }} mask {{ n.split()[1] }}
+{% for e in ln_entries %}
+  network {{ e.net }} mask {{ e.mask }}
 {% endfor %}
-{% endif %}
 {% if routing_type | default('dynamic') == 'dynamic' %}
   neighbor {{ bgp_neighbor_ip }} activate
   neighbor {{ bgp_neighbor_ip }} soft-reconfiguration inbound
@@ -148,8 +181,8 @@ router bgp {{ local_asn | default(398957) }}
 {% endif %}
 
 {# ---- Static routes (static mode only) ---- #}
-{% if routing_type == 'static' and local_networks is defined and local_networks | length > 0 %}
-{% for n in (local_networks.splitlines() | map('trim') | reject('equalto','') | list) %}
-ip route {{ n.split()[0] }} {{ n.split()[1] }} Tunnel{{ tunnel_id }} name {{ safe_desc }}_NET{{ loop.index }}
+{% if routing_type == 'static' and ln_entries | length > 0 %}
+{% for e in ln_entries %}
+ip route {{ e.net }} {{ e.mask }} Tunnel{{ tunnel_id }} name {{ safe_desc }}_NET{{ loop.index }}
 {% endfor %}
 {% endif %}
