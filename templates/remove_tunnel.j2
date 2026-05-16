@@ -1,4 +1,3 @@
-
 {# ======= IKEv2 / IPsec route-based VPN tunnel — REMOVAL ======= #}
 
 {% set safe_desc = tunnel_desc | regex_replace('\\s+', '_') %}
@@ -15,7 +14,7 @@ no ip sla schedule {{ tunnel_id }}
 no ip sla {{ tunnel_id }}
 no track {{ tunnel_id }}
 
-{# ---- Crypto stack (order matters: ipsec profile → ikev2 profile → keyring) ---- #}
+{# ---- Crypto stack (order: ipsec profile → ikev2 profile → keyring) ---- #}
 no crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
 no crypto ikev2 profile PROF_T{{ tunnel_id }}
 no crypto ikev2 keyring KEYRING_T{{ tunnel_id }}
@@ -42,7 +41,7 @@ no route-map {{ outbound_rm_name }}
 {% endif %}
 {% endif %}
 
-{# ---- CSR_LIST entries — emit full 'no <line>' so IOS-XE accepts it ---- #}
+{# ---- CSR_LIST — emit FULL line so IOS-XE accepts the 'no' ---- #}
 {% if pl_remove_lines is defined and (pl_remove_lines | length) > 0 %}
 {% for line in pl_remove_lines %}
 no {{ line }}
@@ -56,7 +55,7 @@ no ip route {{ e.net }} {{ e.mask }} Tunnel{{ tunnel_id }}
 {% endfor %}
 {% endif %}
 
-{# ---- BGP cleanup — only emit 'router bgp ...' if there's actual work to do ---- #}
+{# ---- BGP cleanup — only enter 'router bgp' if there is real work ---- #}
 {% set _bgp_has_neighbor = (routing_type | default('dynamic') == 'dynamic')
                             and bgp_neighbor_ip is defined and (bgp_neighbor_ip | length > 0) %}
 {% set _bgp_has_networks = ln_entries is defined and (ln_entries | length > 0) %}
