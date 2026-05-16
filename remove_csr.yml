@@ -130,8 +130,35 @@
           pl_remove_lines: "{{ pl_remove_lines }}"
 
   tasks:
+    # ------------------------------------------------------------------
+    # BGP cleanup runs FIRST as independent ios_config tasks.
+    # If the later template push fails halfway, BGP is already clean.
+    # failed_when: false  → safe to re-run; missing items become no-ops.
+    # ------------------------------------------------------------------
+    - name: Remove BGP network statements (independent, idempotent)
+      cisco.ios.ios_config:
+        parents:
+          - "router bgp {{ local_asn | default(398957) }}"
+          - "address-family ipv4"
+        lines: ["no network {{ item.net }} mask {{ item.mask }}"]
+      loop: "{{ ln_entries | default([]) }}"
+      failed_when: false
+      when: (ln_entries | default([]) | length) > 0
 
-    
+    - name: Remove BGP neighbor (dynamic mode, independent, idempotent)
+      cisco.ios.ios_config:
+        parents: ["router bgp {{ local_asn | default(398957) }}"]
+        lines: ["no neighbor {{ bgp_neighbor_ip }}"]
+      failed_when: false
+      when:
+        - routing_type | default('dynamic') == 'dynamic'
+        - bgp_neighbor_ip is defined
+        - (bgp_neighbor_ip | length) > 0
+
+    # ------------------------------------------------------------------
+    # Main removal — everything else (interface, crypto, ACL, prefix-list,
+    # static routes, IP SLA, track) goes through the template.
+    # ------------------------------------------------------------------
     - name: Push removal config
       cisco.ios.ios_config:
         src: templates/remove_tunnel.j2
