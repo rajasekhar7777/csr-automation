@@ -130,9 +130,11 @@
           pl_remove_lines: "{{ pl_remove_lines }}"
 
   tasks:
+
+    
     - name: Push removal config
       cisco.ios.ios_config:
-        src: "{{ playbook_dir }}/../templates/remove_tunnel.j2"
+        src: templates/remove_tunnel.j2
       register: cfg
 
     - name: Save startup-config
