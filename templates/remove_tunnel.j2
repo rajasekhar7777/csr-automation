@@ -15,13 +15,14 @@ no ip sla schedule {{ tunnel_id }}
 no ip sla {{ tunnel_id }}
 no track {{ tunnel_id }}
 
-{# ---- Crypto stack (order matters: profile → ikev2 profile → keyring) ---- #}
+{# ---- Crypto stack (order matters: ipsec profile → ikev2 profile → keyring) ---- #}
 no crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
 no crypto ikev2 profile PROF_T{{ tunnel_id }}
 no crypto ikev2 keyring KEYRING_T{{ tunnel_id }}
 
-{# ---- ACL ---- #}
-{% if acl_entries is defined and acl_entries | length > 0 %}
+{# ---- ACL (remove if acl_entries OR acl_name was provided) ---- #}
+{% if (acl_entries is defined and acl_entries | length > 0)
+      or (acl_name is defined and acl_name | length > 0) %}
 no ip access-list extended {{ effective_acl_name }}
 {% endif %}
 
@@ -41,29 +42,34 @@ no route-map {{ outbound_rm_name }}
 {% endif %}
 {% endif %}
 
-{# ---- CSR_LIST entries — only the seqs that match THIS tunnel's networks ---- #}
+{# ---- CSR_LIST entries — only seqs that matched THIS tunnel's networks ---- #}
 {% if pl_remove_seqs is defined and (pl_remove_seqs | length) > 0 %}
 {% for seq in pl_remove_seqs %}
 no ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} seq {{ seq }}
 {% endfor %}
 {% endif %}
 
-{# ---- Static routes that the deploy added (static mode only) ---- #}
+{# ---- Static routes added by deploy (static mode only) ---- #}
 {% if routing_type == 'static' and ln_entries is defined and ln_entries | length > 0 %}
 {% for e in ln_entries %}
 no ip route {{ e.net }} {{ e.mask }} Tunnel{{ tunnel_id }}
 {% endfor %}
 {% endif %}
 
-{# ---- BGP cleanup (parent context preserved by ios_config) ---- #}
+{# ---- BGP cleanup — only emit 'router bgp ...' if there's actual work to do ---- #}
+{% set _bgp_has_neighbor = (routing_type | default('dynamic') == 'dynamic')
+                            and bgp_neighbor_ip is defined and (bgp_neighbor_ip | length > 0) %}
+{% set _bgp_has_networks = ln_entries is defined and (ln_entries | length > 0) %}
+{% if _bgp_has_neighbor or _bgp_has_networks %}
 router bgp {{ local_asn | default(398957) }}
-{% if routing_type | default('dynamic') == 'dynamic' and bgp_neighbor_ip is defined and bgp_neighbor_ip | length > 0 %}
+{% if _bgp_has_neighbor %}
  no neighbor {{ bgp_neighbor_ip }}
 {% endif %}
-{% if ln_entries is defined and ln_entries | length > 0 %}
+{% if _bgp_has_networks %}
  address-family ipv4
 {% for e in ln_entries %}
   no network {{ e.net }} mask {{ e.mask }}
 {% endfor %}
  exit-address-family
+{% endif %}
 {% endif %}
