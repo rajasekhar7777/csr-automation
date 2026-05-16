@@ -1,4 +1,5 @@
 {# ======= IKEv2 / IPsec route-based VPN tunnel — REMOVAL ======= #}
+{# BGP cleanup is handled by the playbook, NOT this template.    #}
 
 {% set safe_desc = tunnel_desc | regex_replace('\\s+', '_') %}
 {% set effective_acl_name = acl_name if (acl_name is defined and acl_name | length > 0) else safe_desc %}
@@ -49,27 +50,8 @@ no {{ line }}
 {% endif %}
 
 {# ---- Static routes added by deploy (static mode only) ---- #}
-{# ---- Static routes added by deploy (static mode only) ---- #}
 {% if routing_type == 'static' and ln_entries is defined and ln_entries | length > 0 %}
 {% for e in ln_entries %}
 no ip route {{ e.net }} {{ e.mask }} Tunnel{{ tunnel_id }} name {{ safe_desc }}_NET{{ loop.index }}
 {% endfor %}
-{% endif %}
-
-{# ---- BGP cleanup — only enter 'router bgp' if there is real work ---- #}
-{% set _bgp_has_neighbor = (routing_type | default('dynamic') == 'dynamic')
-                            and bgp_neighbor_ip is defined and (bgp_neighbor_ip | length > 0) %}
-{% set _bgp_has_networks = ln_entries is defined and (ln_entries | length > 0) %}
-{% if _bgp_has_neighbor or _bgp_has_networks %}
-router bgp {{ local_asn | default(398957) }}
-{% if _bgp_has_neighbor %}
- no neighbor {{ bgp_neighbor_ip }}
-{% endif %}
-{% if _bgp_has_networks %}
- address-family ipv4
-{% for e in ln_entries %}
-  no network {{ e.net }} mask {{ e.mask }}
-{% endfor %}
- exit-address-family
-{% endif %}
 {% endif %}
