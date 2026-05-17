@@ -1,6 +1,6 @@
+===== BEGIN templates/policy_based_vpn.j2 =====
 {# ====================================================================
    Policy-based IKEv2/IPsec VPN (crypto-map on WAN)
-   Always: static routing via WAN GW; optional BGP 'network' advertisement.
    ==================================================================== #}
 
 {% set safe_desc          = crypto_map_desc | regex_replace('\\s+', '_') %}
@@ -12,13 +12,8 @@
 {% set effective_mapname  = crypto_map_name | default('MYMAP', true) %}
 {% set effective_wanif    = wan_interface   | default('GigabitEthernet1', true) %}
 
-{# Mask → prefix-length lookup #}
-{% set _octet_bits = {
-  '0':0, '128':1, '192':2, '224':3, '240':4,
-  '248':5, '252':6, '254':7, '255':8
-} %}
+{% set _octet_bits = {'0':0,'128':1,'192':2,'224':3,'240':4,'248':5,'252':6,'254':7,'255':8} %}
 
-{# Normalize local_networks #}
 {% set ln_entries = [] %}
 {% if local_networks is defined and local_networks | length > 0 %}
 {% for raw in local_networks.splitlines() %}
@@ -49,7 +44,6 @@
 {% endfor %}
 {% endif %}
 
-{# Peers — prefer peers_list from playbook; fallback to single peer from flat vars #}
 {% set _peers = [] %}
 {% if peers_list is defined and peers_list is iterable and (peers_list | length > 0) %}
 {% set _peers = peers_list %}
@@ -57,14 +51,12 @@
 {% set _p = {'name': safe_desc, 'address': remote_peer_ip} %}
 {% if psk_local  is defined and psk_local  | length > 0 %}{% set _p = _p | combine({'psk_local':  psk_local })  %}{% endif %}
 {% if psk_remote is defined and psk_remote | length > 0 %}{% set _p = _p | combine({'psk_remote': psk_remote}) %}{% endif %}
-{% if (psk_local  is not defined or (psk_local  | length) == 0)
-      and (psk_remote is not defined or (psk_remote | length) == 0) %}
+{% if (psk_local  is not defined or (psk_local  | length) == 0) and (psk_remote is not defined or (psk_remote | length) == 0) %}
 {% set _p = _p | combine({'psk': vpn_psk}) %}
 {% endif %}
 {% set _peers = [_p] %}
 {% endif %}
 
-{# ---- Transform sets (always declare all three; idempotent) ---- #}
 crypto ipsec transform-set AES256-SHA256 esp-aes 256 esp-sha256-hmac
  mode tunnel
 crypto ipsec transform-set AES256-SHA1 esp-aes 256 esp-sha-hmac
@@ -72,7 +64,6 @@ crypto ipsec transform-set AES256-SHA1 esp-aes 256 esp-sha-hmac
 crypto ipsec transform-set AES128-SHA1 esp-aes esp-sha-hmac
  mode tunnel
 
-{# ---- IKEv2 proposal/policy ---- #}
 crypto ikev2 proposal azure-proposal-VNG
  encryption aes-cbc-256 aes-cbc-128
  integrity sha1 sha256
@@ -81,7 +72,6 @@ crypto ikev2 proposal azure-proposal-VNG
 crypto ikev2 policy azure-policy-VNG
  proposal azure-proposal-VNG
 
-{# ---- IKEv2 keyring (multi-peer aware) ---- #}
 crypto ikev2 keyring {{ effective_keyring }}
 {% for p in _peers %}
  peer {{ p.name }}
@@ -91,9 +81,8 @@ crypto ikev2 keyring {{ effective_keyring }}
 {% if p.psk_remote is defined and p.psk_remote | length > 0 %}  pre-shared-key remote {{ p.psk_remote }}{% endif %}
 {% endfor %}
 
-{# ---- IKEv2 profile (user-defined identity types) ---- #}
-{% set _mir_type  = (match_identity_remote_type  | default('address') | lower) %}
-{% set _mir_value = match_identity_remote_value | default(remote_peer_ip) %}
+{% set _mir_type  = (match_identity_remote_type  | default('address', true) | lower) %}
+{% set _mir_value = match_identity_remote_value | default(remote_peer_ip, true) %}
 crypto ikev2 profile {{ effective_profile }}
 {% if _mir_type == 'address' %}
  match identity remote address {{ _mir_value }} 255.255.255.255
@@ -103,7 +92,7 @@ crypto ikev2 profile {{ effective_profile }}
  authentication remote pre-share
  authentication local  pre-share
  keyring local {{ effective_keyring }}
-{% if identity_local_type is defined and identity_local_value is defined and identity_local_value | length > 0 %}
+{% if identity_local_type is defined and (identity_local_type | length) > 0 and identity_local_value is defined and (identity_local_value | length) > 0 %}
 {% if (identity_local_type | lower) == 'address' %}
  identity local address {{ identity_local_value }}
 {% else %}
@@ -113,7 +102,6 @@ crypto ikev2 profile {{ effective_profile }}
  lifetime {{ effective_lifetime }}
  dpd 10 5 on-demand
 
-{# ---- ACL ---- #}
 {% if acl_entries is defined and acl_entries | length > 0 %}
 {% set acl_lines = acl_entries.splitlines() | map('trim') | reject('equalto','') | list %}
 ip access-list extended {{ effective_acl_name }}
@@ -122,7 +110,6 @@ ip access-list extended {{ effective_acl_name }}
 {% endfor %}
 {% endif %}
 
-{# ---- Crypto map + apply to WAN ---- #}
 crypto map {{ effective_mapname }} {{ crypto_map_id }} ipsec-isakmp
  description {{ crypto_map_desc }}
  set peer {{ remote_peer_ip }}
@@ -133,10 +120,8 @@ crypto map {{ effective_mapname }} {{ crypto_map_id }} ipsec-isakmp
 interface {{ effective_wanif }}
  crypto map {{ effective_mapname }}
 
-{# ---- WAN route to peer ---- #}
 ip route {{ remote_peer_ip }} 255.255.255.255 10.138.1.1 name WAN_{{ safe_desc }}
 
-{# ---- CSR_LIST entries ---- #}
 {% if ln_entries | length > 0 %}
 {% for e in ln_entries %}
 ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} seq {{ (pl_next_seq | int) + (loop.index0 * 5) }} permit {{ e.net }}/{{ e.bits }}{% if csr_pl_lege is defined and (csr_pl_lege | trim | length) > 0 %} {{ csr_pl_lege | trim }}{% endif %}
@@ -144,9 +129,8 @@ ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} seq {{ (pl_next_seq
 {% endfor %}
 {% endif %}
 
-{# ---- BGP advertisement (no neighbor — just 'network' under address-family) ---- #}
 {% if ln_entries | length > 0 %}
-router bgp {{ local_asn | default(398957) }}
+router bgp {{ local_asn | default(398957, true) }}
  bgp log-neighbor-changes
  address-family ipv4
 {% for e in ln_entries %}
@@ -155,9 +139,9 @@ router bgp {{ local_asn | default(398957) }}
  exit-address-family
 {% endif %}
 
-{# ---- Static routes via WAN GW with crypto map description as name ---- #}
 {% if ln_entries | length > 0 %}
 {% for e in ln_entries %}
 ip route {{ e.net }} {{ e.mask }} 10.138.1.1 name {{ safe_desc }}_NET{{ loop.index }}
 {% endfor %}
 {% endif %}
+===== END templates/policy_based_vpn.j2 =====
