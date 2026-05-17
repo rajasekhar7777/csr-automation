@@ -1,4 +1,4 @@
-===== BEGIN templates/policy_based_vpn.j2 =====
+
 {# ====================================================================
    Policy-based IKEv2/IPsec VPN (crypto-map on WAN)
    ==================================================================== #}
@@ -144,4 +144,4 @@ router bgp {{ local_asn | default(398957, true) }}
 ip route {{ e.net }} {{ e.mask }} 10.138.1.1 name {{ safe_desc }}_NET{{ loop.index }}
 {% endfor %}
 {% endif %}
-===== END templates/policy_based_vpn.j2 =====
+
