@@ -106,7 +106,7 @@
   tasks:
     - name: Push generated config
       cisco.ios.ios_config:
-        src: templates/policy_based_vpn.j2
+        src: templates/IKEV2_policy_based_vpn.j2
       register: cfg
 
     - name: Save startup-config
