@@ -1,0 +1,249 @@
+---
+- name: Remove Policy-Based IKEv2/IPsec VPN from Cisco CSR
+  hosts: all
+  gather_facts: false
+
+  pre_tasks:
+    # ---------- Whitespace normalization + empty-string-safe defaults ----------
+    - name: Normalize critical text inputs
+      ansible.builtin.set_fact:
+        crypto_map_desc: "{{ crypto_map_desc | default('')              | trim }}"
+        crypto_map_name: "{{ crypto_map_name | default('MYMAP',         true) | trim }}"
+        wan_interface:   "{{ wan_interface   | default('GigabitEthernet1', true) | trim }}"
+        csr_pl_name:     "{{ csr_pl_name     | default('CSR_LIST',      true) | trim }}"
+        keyring_name:    "{{ keyring_name    | default('',              true) | trim }}"
+        profile_name:    "{{ profile_name    | default('',              true) | trim }}"
+        acl_name:        "{{ acl_name        | default('',              true) | trim }}"
+        remove_acl:      "{{ remove_acl      | default(true,            true) }}"
+        remove_profile:  "{{ remove_profile  | default(true,            true) }}"
+        remove_keyring:  "{{ remove_keyring  | default(true,            true) }}"
+        remove_static_routes: "{{ remove_static_routes | default(true,  true) }}"
+        remove_bgp_networks:  "{{ remove_bgp_networks  | default(true,  true) }}"
+        remove_csr_list_entries: "{{ remove_csr_list_entries | default(true, true) }}"
+
+    # ---------- Safety gate ----------
+    - name: Validate required identifiers
+      ansible.builtin.assert:
+        that:
+          - crypto_map_desc is defined and (crypto_map_desc | length) > 0
+          - crypto_map_id   is defined and (crypto_map_id | int) > 0
+          - confirm_crypto_map_id is defined and (confirm_crypto_map_id | int) > 0
+        fail_msg: >
+          Required: crypto_map_desc, crypto_map_id (>0), confirm_crypto_map_id (>0).
+
+    - name: SAFETY GATE — confirm_crypto_map_id must match crypto_map_id
+      ansible.builtin.assert:
+        that:
+          - (crypto_map_id | int) == (confirm_crypto_map_id | int)
+        fail_msg: >-
+          ABORT: confirm_crypto_map_id ({{ confirm_crypto_map_id }})
+          does not match crypto_map_id ({{ crypto_map_id }}).
+          Refusing to remove to prevent accidental deletion.
+
+    # ---------- Derive effective names ----------
+    - name: Derive safe_desc & effective object names
+      ansible.builtin.set_fact:
+        safe_desc: "{{ crypto_map_desc | regex_replace('\\s+', '_') }}"
+
+    - name: Compute fallback names if blank
+      ansible.builtin.set_fact:
+        effective_acl_name:     "{{ acl_name     if (acl_name     | length) > 0 else safe_desc }}"
+        effective_keyring_name: "{{ keyring_name if (keyring_name | length) > 0 else ('KEYRING_' ~ safe_desc) }}"
+        effective_profile_name: "{{ profile_name if (profile_name | length) > 0 else ('PROF_'    ~ safe_desc) }}"
+
+    # ---------- Pre-flight: confirm the crypto map seq exists ----------
+    - name: Read current crypto map entry
+      cisco.ios.ios_command:
+        commands:
+          - "show running-config | section crypto map {{ crypto_map_name }}"
+      register: cm_show
+      changed_when: false
+
+    - name: Check if target seq exists in the crypto map
+      ansible.builtin.set_fact:
+        cm_seq_exists: >-
+          {{ (cm_show.stdout[0] | default('')) is search('crypto map ' ~ crypto_map_name ~ ' ' ~ (crypto_map_id | string) ~ ' ipsec-isakmp') }}
+
+    - name: Warn if crypto map seq not present (idempotent path)
+      ansible.builtin.debug:
+        msg: "Crypto map {{ crypto_map_name }} {{ crypto_map_id }} not found — will still attempt cleanup of associated objects."
+      when: not cm_seq_exists
+
+    # ---------- Parse local_networks for BGP / static-route / CSR_LIST cleanup ----------
+    - name: Build ln_entries from local_networks
+      ansible.builtin.set_fact:
+        ln_entries: >-
+          {%- set out = [] -%}
+          {%- set octet_bits = {'0':0,'128':1,'192':2,'224':3,'240':4,'248':5,'252':6,'254':7,'255':8} -%}
+          {%- set table = {0:'0',1:'128',2:'192',3:'224',4:'240',5:'248',6:'252',7:'254',8:'255'} -%}
+          {%- for raw in (local_networks | default('')).splitlines() -%}
+          {%-   set line = raw | trim -%}
+          {%-   if line | length > 0 -%}
+          {%-     if '/' in line and (line.split() | length) == 1 -%}
+          {%-       set net  = line.split('/')[0] -%}
+          {%-       set bits = line.split('/')[1] | int -%}
+          {%-       set full = (bits // 8) -%}
+          {%-       set rem  = (bits %  8) -%}
+          {%-       set parts = [] -%}
+          {%-       for i in range(4) -%}
+          {%-         if i < full -%}{%- set _ = parts.append('255') -%}
+          {%-         elif i == full -%}{%- set _ = parts.append(table[rem]) -%}
+          {%-         else -%}{%- set _ = parts.append('0') -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-       set _ = out.append({'net': net, 'mask': parts | join('.'), 'bits': bits}) -%}
+          {%-     elif (line.split() | length) >= 2 -%}
+          {%-       set p  = line.split() -%}
+          {%-       set mo = p[1].split('.') -%}
+          {%-       if (mo | length) == 4 -%}
+          {%-         set bits = octet_bits.get(mo[0],0) + octet_bits.get(mo[1],0) + octet_bits.get(mo[2],0) + octet_bits.get(mo[3],0) -%}
+          {%-         set _ = out.append({'net': p[0], 'mask': p[1], 'bits': bits}) -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    # ---------- Read CSR_LIST seqs that match our networks ----------
+    - name: Read current CSR_LIST state
+      cisco.ios.ios_command:
+        commands: "show ip prefix-list {{ csr_pl_name }}"
+      register: pl_show
+      changed_when: false
+      failed_when: false
+
+    - name: Find CSR_LIST seq numbers owned by this tunnel
+      ansible.builtin.set_fact:
+        owned_pl_seqs: >-
+          {%- set out = [] -%}
+          {%- set txt = pl_show.stdout[0] | default('') -%}
+          {%- for e in ln_entries -%}
+          {%-   set pat = 'seq\\s+(\\d+)\\s+permit\\s+' ~ (e.net | regex_escape) ~ '/' ~ (e.bits | string) ~ '\\b' -%}
+          {%-   for m in (txt | regex_findall(pat)) -%}
+          {%-     set _ = out.append(m | int) -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: Show planned removal summary
+      ansible.builtin.debug:
+        msg:
+          crypto_map:           "{{ crypto_map_name }} {{ crypto_map_id }}"
+          crypto_map_desc:      "{{ crypto_map_desc }}"
+          cm_seq_exists:        "{{ cm_seq_exists }}"
+          wan_interface:        "{{ wan_interface }}"
+          acl_name:             "{{ effective_acl_name }}     (remove={{ remove_acl }})"
+          profile_name:         "{{ effective_profile_name }} (remove={{ remove_profile }})"
+          keyring_name:         "{{ effective_keyring_name }} (remove={{ remove_keyring }})"
+          ln_entries_count:     "{{ ln_entries | length }}"
+          owned_pl_seqs:        "{{ owned_pl_seqs }}"
+          remove_static_routes: "{{ remove_static_routes }}"
+          remove_bgp_networks:  "{{ remove_bgp_networks }}"
+          remove_csr_list_entries: "{{ remove_csr_list_entries }}"
+
+  tasks:
+    # ---------- BGP network cleanup (independent task — safer than template) ----------
+    - name: Remove BGP network statements
+      cisco.ios.ios_config:
+        parents:
+          - "router bgp {{ local_asn | default(398957, true) }}"
+          - "address-family ipv4"
+        lines: "no network {{ item.net }} mask {{ item.mask }}"
+      loop: "{{ ln_entries }}"
+      when:
+        - remove_bgp_networks | bool
+        - ln_entries | length > 0
+      failed_when: false
+
+    # ---------- Static route cleanup ----------
+    - name: Remove WAN host-route to remote peer
+      cisco.ios.ios_config:
+        lines: "no ip route {{ remote_peer_ip }} 255.255.255.255 10.138.1.1 name WAN_{{ safe_desc }}"
+      when:
+        - remove_static_routes | bool
+        - remote_peer_ip is defined and (remote_peer_ip | length) > 0
+      failed_when: false
+
+    - name: Remove per-network static routes
+      cisco.ios.ios_config:
+        lines: "no ip route {{ item.net }} {{ item.mask }} 10.138.1.1 name {{ safe_desc }}_NET{{ idx }}"
+      loop: "{{ ln_entries }}"
+      loop_control:
+        index_var: idx0
+      vars:
+        idx: "{{ idx0 + 1 }}"
+      when:
+        - remove_static_routes | bool
+        - ln_entries | length > 0
+      failed_when: false
+
+    # ---------- CSR_LIST seq removal ----------
+    - name: Remove owned CSR_LIST seq entries
+      cisco.ios.ios_config:
+        lines: "no ip prefix-list {{ csr_pl_name }} seq {{ item }}"
+      loop: "{{ owned_pl_seqs }}"
+      when:
+        - remove_csr_list_entries | bool
+        - owned_pl_seqs | length > 0
+      failed_when: false
+
+    # ---------- Crypto map entry + ACL + profile + keyring via template ----------
+    - name: Push removal config (crypto map seq, ACL, profile, keyring)
+      cisco.ios.ios_config:
+        src: templates/remove_IKEV2_policy_based_vpn.j2
+      register: cfg
+
+    - name: Save startup-config
+      cisco.ios.ios_command:
+        commands: write memory
+      when: cfg.changed
+
+    - name: Show pushed removal lines
+      ansible.builtin.debug:
+        var: cfg.commands
+      when: cfg.changed
+
+  post_tasks:
+    - name: Verify — crypto map (should NOT contain seq {{ crypto_map_id }})
+      cisco.ios.ios_command:
+        commands:
+          - "show running-config | section crypto map {{ crypto_map_name }}"
+      register: vfy_cm
+      changed_when: false
+
+    - name: Verify — CSR_LIST after removal
+      cisco.ios.ios_command:
+        commands:
+          - "show ip prefix-list {{ csr_pl_name }}"
+      register: vfy_pl
+      changed_when: false
+
+    - name: Verify — BGP section after removal
+      cisco.ios.ios_command:
+        commands:
+          - "show running-config | section bgp"
+      register: vfy_bgp
+      changed_when: false
+
+    - name: Verify — IKEv2 profile/keyring/ACL existence
+      cisco.ios.ios_command:
+        commands:
+          - "show running-config | include ^crypto ikev2 profile {{ effective_profile_name }}$|^crypto ikev2 keyring {{ effective_keyring_name }}$|^ip access-list extended {{ effective_acl_name }}$"
+      register: vfy_objs
+      changed_when: false
+
+    - name: Print verification — crypto map
+      ansible.builtin.debug:
+        msg: "{{ vfy_cm.stdout[0].splitlines() }}"
+
+    - name: Print verification — CSR_LIST
+      ansible.builtin.debug:
+        msg: "{{ vfy_pl.stdout[0].splitlines() }}"
+
+    - name: Print verification — BGP section
+      ansible.builtin.debug:
+        msg: "{{ vfy_bgp.stdout[0].splitlines() }}"
+
+    - name: Print verification — residual ACL/profile/keyring
+      ansible.builtin.debug:
+        msg: "{{ vfy_objs.stdout[0].splitlines() }}"
