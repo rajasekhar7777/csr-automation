@@ -1,0 +1,161 @@
+---
+- name: Deploy Policy-Based IKEv2/IPsec VPN on Cisco CSR
+  hosts: all
+  gather_facts: false
+
+  pre_tasks:
+    # ---------- Whitespace normalization ----------
+    - name: Normalize critical text inputs
+      ansible.builtin.set_fact:
+        crypto_map_desc: "{{ crypto_map_desc | default('') | trim }}"
+        transform_set:   "{{ transform_set   | default('AES256-SHA256') | trim }}"
+
+    # ---------- Validation ----------
+    - name: Validate required core fields
+      ansible.builtin.assert:
+        that:
+          - crypto_map_desc is defined and (crypto_map_desc | length) > 0
+          - crypto_map_id is defined and (crypto_map_id | int) > 0
+          - remote_peer_ip is defined and (remote_peer_ip | length) > 0
+          - acl_entries is defined and (acl_entries | length) > 0
+        fail_msg: >
+          Required: crypto_map_desc, crypto_map_id (>0), remote_peer_ip, acl_entries.
+
+    - name: Validate local_networks (always static routing in policy-based)
+      ansible.builtin.assert:
+        that:
+          - local_networks is defined and (local_networks | length) > 0
+        fail_msg: "local_networks is required (one CIDR or 'NET MASK' per line)"
+
+    - name: Validate transform_set
+      ansible.builtin.assert:
+        that:
+          - transform_set in ['AES256-SHA256', 'AES256-SHA1', 'AES128-SHA1']
+        fail_msg: "transform_set must be one of AES256-SHA256, AES256-SHA1, AES128-SHA1"
+
+    - name: Validate match_identity_remote_type
+      ansible.builtin.assert:
+        that:
+          - match_identity_remote_type is not defined
+            or (match_identity_remote_type | lower) in ['address', 'fqdn']
+        fail_msg: "match_identity_remote_type must be 'address' or 'fqdn'"
+
+    - name: Validate identity_local_type (optional)
+      ansible.builtin.assert:
+        that:
+          - identity_local_type is not defined
+            or (identity_local_type | length) == 0
+            or (identity_local_type | lower) in ['address', 'fqdn']
+        fail_msg: "identity_local_type must be 'address' or 'fqdn' (or blank)"
+
+    # ---------- Parse peers_raw textarea ----------
+    # Format per line, pipe-separated:
+    #   name|address|psk
+    #   name|address|psk_local|psk_remote
+    - name: Build peers_list from peers_raw
+      ansible.builtin.set_fact:
+        peers_list: >-
+          {%- set out = [] -%}
+          {%- for raw in (peers_raw | default('')).splitlines() -%}
+          {%-   set line = raw | trim -%}
+          {%-   if line | length > 0 and not line.startswith('#') -%}
+          {%-     set f = line.split('|') | map('trim') | list -%}
+          {%-     if (f | length) == 3 -%}
+          {%-       set _ = out.append({'name': f[0], 'address': f[1], 'psk': f[2]}) -%}
+          {%-     elif (f | length) == 4 -%}
+          {%-       set _ = out.append({'name': f[0], 'address': f[1], 'psk_local': f[2], 'psk_remote': f[3]}) -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    # ---------- CSR_LIST seq discovery ----------
+    - name: Read current CSR_LIST state
+      cisco.ios.ios_command:
+        commands: "show ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }}"
+      register: pl_show
+      failed_when: false
+
+    - name: Parse existing seq numbers
+      ansible.builtin.set_fact:
+        pl_existing_seqs: >-
+          {{
+            (pl_show.stdout[0] | default('') | regex_findall('seq\s+(\d+)'))
+            | map('int') | list
+          }}
+
+    - name: Compute starting next seq
+      ansible.builtin.set_fact:
+        pl_next_seq: "{{ ((pl_existing_seqs + [0]) | max | int) + 5 }}"
+
+    - name: Show derived facts (debug)
+      ansible.builtin.debug:
+        msg:
+          crypto_map_name: "{{ crypto_map_name | default('MYMAP') }}"
+          crypto_map_id:   "{{ crypto_map_id }}"
+          crypto_map_desc: "{{ crypto_map_desc }}"
+          remote_peer_ip:  "{{ remote_peer_ip }}"
+          transform_set:   "{{ transform_set }}"
+          ikev2_lifetime:  "{{ ikev2_lifetime | default(28800) }}"
+          keyring_name:    "{{ keyring_name | default('KEYRING_' ~ (crypto_map_desc | regex_replace('\\s+','_'))) }}"
+          profile_name:    "{{ profile_name | default('PROF_'    ~ (crypto_map_desc | regex_replace('\\s+','_'))) }}"
+          peers_count:     "{{ peers_list | length }}"
+          peers_list:      "{{ peers_list }}"
+          pl_next_seq:     "{{ pl_next_seq }}"
+
+  tasks:
+    - name: Push generated config
+      cisco.ios.ios_config:
+        src: templates/policy_based_vpn.j2
+      register: cfg
+
+    - name: Save startup-config
+      cisco.ios.ios_command:
+        commands: write memory
+      when: cfg.changed
+
+    - name: Show pushed lines
+      ansible.builtin.debug:
+        var: cfg.commands
+      when: cfg.changed
+
+  post_tasks:
+    - name: Verify — crypto map
+      cisco.ios.ios_command:
+        commands: ["show running-config | section crypto map {{ crypto_map_name | default('MYMAP') }}"]
+      register: vfy_cm
+      changed_when: false
+
+    - name: Verify — WAN interface (crypto map attached?)
+      cisco.ios.ios_command:
+        commands: ["show running-config interface {{ wan_interface | default('GigabitEthernet1') }}"]
+      register: vfy_wan
+      changed_when: false
+
+    - name: Verify — running-config BGP section
+      cisco.ios.ios_command:
+        commands: ["show running-config | section bgp"]
+      register: vfy_bgp
+      changed_when: false
+
+    - name: Verify — CSR_LIST
+      cisco.ios.ios_command:
+        commands: ["show ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }}"]
+      register: vfy_pl
+      changed_when: false
+
+    - name: Print verification — crypto map
+      ansible.builtin.debug:
+        msg: "{{ vfy_cm.stdout[0].splitlines() }}"
+
+    - name: Print verification — WAN interface
+      ansible.builtin.debug:
+        msg: "{{ vfy_wan.stdout[0].splitlines() }}"
+
+    - name: Print verification — BGP section
+      ansible.builtin.debug:
+        msg: "{{ vfy_bgp.stdout[0].splitlines() }}"
+
+    - name: Print verification — CSR_LIST
+      ansible.builtin.debug:
+        msg: "{{ vfy_pl.stdout[0].splitlines() }}"
