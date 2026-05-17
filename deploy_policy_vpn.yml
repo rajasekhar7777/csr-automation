@@ -4,20 +4,30 @@
   gather_facts: false
 
   pre_tasks:
-    # ---------- Whitespace normalization ----------
+    # ---------- Whitespace normalization + empty-string defaults ----------
     - name: Normalize critical text inputs
       ansible.builtin.set_fact:
-        crypto_map_desc: "{{ crypto_map_desc | default('') | trim }}"
-        transform_set:   "{{ transform_set   | default('AES256-SHA256') | trim }}"
+        crypto_map_desc: "{{ crypto_map_desc | default('')              | trim }}"
+        transform_set:   "{{ transform_set   | default('AES256-SHA256', true) | trim }}"
+        crypto_map_name: "{{ crypto_map_name | default('MYMAP',         true) | trim }}"
+        wan_interface:   "{{ wan_interface   | default('GigabitEthernet1', true) | trim }}"
+        csr_pl_name:     "{{ csr_pl_name     | default('CSR_LIST',      true) | trim }}"
+        ikev2_lifetime:  "{{ ikev2_lifetime  | default(28800,           true) }}"
+        keyring_name:    "{{ keyring_name    | default('',              true) | trim }}"
+        profile_name:    "{{ profile_name    | default('',              true) | trim }}"
+        match_identity_remote_type:  "{{ match_identity_remote_type  | default('address', true) | trim | lower }}"
+        match_identity_remote_value: "{{ match_identity_remote_value | default('',        true) | trim }}"
+        identity_local_type:         "{{ identity_local_type         | default('',        true) | trim | lower }}"
+        identity_local_value:        "{{ identity_local_value        | default('',        true) | trim }}"
 
     # ---------- Validation ----------
     - name: Validate required core fields
       ansible.builtin.assert:
         that:
           - crypto_map_desc is defined and (crypto_map_desc | length) > 0
-          - crypto_map_id is defined and (crypto_map_id | int) > 0
-          - remote_peer_ip is defined and (remote_peer_ip | length) > 0
-          - acl_entries is defined and (acl_entries | length) > 0
+          - crypto_map_id   is defined and (crypto_map_id | int) > 0
+          - remote_peer_ip  is defined and (remote_peer_ip | length) > 0
+          - acl_entries     is defined and (acl_entries | length) > 0
         fail_msg: >
           Required: crypto_map_desc, crypto_map_id (>0), remote_peer_ip, acl_entries.
 
@@ -36,16 +46,14 @@
     - name: Validate match_identity_remote_type
       ansible.builtin.assert:
         that:
-          - match_identity_remote_type is not defined
-            or (match_identity_remote_type | lower) in ['address', 'fqdn']
+          - match_identity_remote_type in ['address', 'fqdn']
         fail_msg: "match_identity_remote_type must be 'address' or 'fqdn'"
 
     - name: Validate identity_local_type (optional)
       ansible.builtin.assert:
         that:
-          - identity_local_type is not defined
-            or (identity_local_type | length) == 0
-            or (identity_local_type | lower) in ['address', 'fqdn']
+          - (identity_local_type | length) == 0
+            or identity_local_type in ['address', 'fqdn']
         fail_msg: "identity_local_type must be 'address' or 'fqdn' (or blank)"
 
     # ---------- Parse peers_raw textarea ----------
@@ -72,7 +80,7 @@
     # ---------- CSR_LIST seq discovery ----------
     - name: Read current CSR_LIST state
       cisco.ios.ios_command:
-        commands: "show ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }}"
+        commands: "show ip prefix-list {{ csr_pl_name }}"
       register: pl_show
       failed_when: false
 
@@ -91,14 +99,20 @@
     - name: Show derived facts (debug)
       ansible.builtin.debug:
         msg:
-          crypto_map_name: "{{ crypto_map_name | default('MYMAP') }}"
+          crypto_map_name: "{{ crypto_map_name }}"
           crypto_map_id:   "{{ crypto_map_id }}"
           crypto_map_desc: "{{ crypto_map_desc }}"
           remote_peer_ip:  "{{ remote_peer_ip }}"
           transform_set:   "{{ transform_set }}"
-          ikev2_lifetime:  "{{ ikev2_lifetime | default(28800) }}"
-          keyring_name:    "{{ keyring_name | default('KEYRING_' ~ (crypto_map_desc | regex_replace('\\s+','_'))) }}"
-          profile_name:    "{{ profile_name | default('PROF_'    ~ (crypto_map_desc | regex_replace('\\s+','_'))) }}"
+          ikev2_lifetime:  "{{ ikev2_lifetime }}"
+          wan_interface:   "{{ wan_interface }}"
+          csr_pl_name:     "{{ csr_pl_name }}"
+          keyring_name:    "{{ keyring_name | default('KEYRING_' ~ (crypto_map_desc | regex_replace('\\s+','_')), true) }}"
+          profile_name:    "{{ profile_name | default('PROF_'    ~ (crypto_map_desc | regex_replace('\\s+','_')), true) }}"
+          match_identity_remote_type:  "{{ match_identity_remote_type }}"
+          match_identity_remote_value: "{{ match_identity_remote_value }}"
+          identity_local_type:         "{{ identity_local_type }}"
+          identity_local_value:        "{{ identity_local_value }}"
           peers_count:     "{{ peers_list | length }}"
           peers_list:      "{{ peers_list }}"
           pl_next_seq:     "{{ pl_next_seq }}"
@@ -122,25 +136,29 @@
   post_tasks:
     - name: Verify — crypto map
       cisco.ios.ios_command:
-        commands: ["show running-config | section crypto map {{ crypto_map_name | default('MYMAP') }}"]
+        commands:
+          - "show running-config | section crypto map {{ crypto_map_name }}"
       register: vfy_cm
       changed_when: false
 
     - name: Verify — WAN interface (crypto map attached?)
       cisco.ios.ios_command:
-        commands: ["show running-config interface {{ wan_interface | default('GigabitEthernet1') }}"]
+        commands:
+          - "show running-config interface {{ wan_interface }}"
       register: vfy_wan
       changed_when: false
 
     - name: Verify — running-config BGP section
       cisco.ios.ios_command:
-        commands: ["show running-config | section bgp"]
+        commands:
+          - "show running-config | section bgp"
       register: vfy_bgp
       changed_when: false
 
     - name: Verify — CSR_LIST
       cisco.ios.ios_command:
-        commands: ["show ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }}"]
+        commands:
+          - "show ip prefix-list {{ csr_pl_name }}"
       register: vfy_pl
       changed_when: false
 
