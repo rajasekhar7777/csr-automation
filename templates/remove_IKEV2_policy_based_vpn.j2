@@ -3,23 +3,28 @@
    Removes: crypto map seq, ACL, IKEv2 profile, IKEv2 keyring
    (BGP networks, static routes, CSR_LIST seqs are handled as
     independent playbook tasks for safety.)
+
+   This template relies on facts set in the playbook:
+     - eff_crypto_map_name    (defaulted, extra-vars-safe)
+     - eff_remove_acl         (defaulted, extra-vars-safe)
+     - eff_remove_profile     (defaulted, extra-vars-safe)
+     - eff_remove_keyring     (defaulted, extra-vars-safe)
+     - effective_acl_name     (computed in playbook)
+     - effective_profile_name (computed in playbook)
+     - effective_keyring_name (computed in playbook)
+     - crypto_map_id          (raw survey int)
    ==================================================================== #}
 
-{% set safe_desc              = crypto_map_desc | regex_replace('\\s+', '_') %}
-{% set effective_acl_name     = acl_name        if (acl_name        | length) > 0 else safe_desc %}
-{% set effective_keyring_name = keyring_name    if (keyring_name    | length) > 0 else ('KEYRING_' ~ safe_desc) %}
-{% set effective_profile_name = profile_name    if (profile_name    | length) > 0 else ('PROF_'    ~ safe_desc) %}
+no crypto map {{ eff_crypto_map_name }} {{ crypto_map_id }}
 
-no crypto map {{ crypto_map_name }} {{ crypto_map_id }}
-
-{% if remove_acl | bool %}
+{% if eff_remove_acl | bool %}
 no ip access-list extended {{ effective_acl_name }}
 {% endif %}
 
-{% if remove_profile | bool %}
+{% if eff_remove_profile | bool %}
 no crypto ikev2 profile {{ effective_profile_name }}
 {% endif %}
 
-{% if remove_keyring | bool %}
+{% if eff_remove_keyring | bool %}
 no crypto ikev2 keyring {{ effective_keyring_name }}
 {% endif %}
