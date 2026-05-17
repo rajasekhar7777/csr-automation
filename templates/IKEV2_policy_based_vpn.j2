@@ -7,10 +7,10 @@
 {% set effective_acl_name = acl_name        if (acl_name        is defined and acl_name        | length > 0) else safe_desc %}
 {% set effective_keyring  = keyring_name    if (keyring_name    is defined and keyring_name    | length > 0) else 'KEYRING_' ~ safe_desc %}
 {% set effective_profile  = profile_name    if (profile_name    is defined and profile_name    | length > 0) else 'PROF_'    ~ safe_desc %}
-{% set effective_xform    = transform_set   | default('AES256-SHA256') %}
-{% set effective_lifetime = ikev2_lifetime  | default(28800) %}
-{% set effective_mapname  = crypto_map_name | default('MYMAP') %}
-{% set effective_wanif    = wan_interface   | default('GigabitEthernet1') %}
+{% set effective_xform    = transform_set   | default('AES256-SHA256', true) %}
+{% set effective_lifetime = ikev2_lifetime  | default(28800, true) %}
+{% set effective_mapname  = crypto_map_name | default('MYMAP', true) %}
+{% set effective_wanif    = wan_interface   | default('GigabitEthernet1', true) %}
 
 {# Mask → prefix-length lookup #}
 {% set _octet_bits = {
