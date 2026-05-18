@@ -1,14 +1,13 @@
+
 {# ====================================================================
    Policy-based IKEv2/IPsec VPN — Removal
    Removes: crypto map seq, ACL, IKEv2 profile, IKEv2 keyring
    (BGP networks, static routes, CSR_LIST seqs are handled as
     independent playbook tasks for safety.)
 
-   This template relies on facts set in the playbook:
-     - eff_crypto_map_name    (defaulted, extra-vars-safe)
-     - eff_remove_acl         (defaulted, extra-vars-safe)
-     - eff_remove_profile     (defaulted, extra-vars-safe)
-     - eff_remove_keyring     (defaulted, extra-vars-safe)
+   Relies on playbook facts:
+     - eff_crypto_map_name    (hard-coded "MYMAP")
+     - eff_remove_acl / eff_remove_profile / eff_remove_keyring (booleans)
      - effective_acl_name     (computed in playbook)
      - effective_profile_name (computed in playbook)
      - effective_keyring_name (computed in playbook)
