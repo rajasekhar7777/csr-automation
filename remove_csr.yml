@@ -4,61 +4,89 @@
   gather_facts: false
 
   pre_tasks:
+    # ---------- Normalize inputs into eff_* facts (extra-vars-safe) ----------
+    - name: Normalize critical inputs into eff_* facts
+      ansible.builtin.set_fact:
+        eff_tunnel_desc:        "{{ tunnel_desc        | default('')             | trim }}"
+        eff_routing_type:       "{{ routing_type       | default('dynamic', true) | trim | lower }}"
+        eff_keyring_name:       "{{ keyring_name       | default('',        true) | trim }}"
+        eff_profile_name:       "{{ profile_name       | default('',        true) | trim }}"
+        eff_ipsec_profile_name: "{{ ipsec_profile_name | default('',        true) | trim }}"
+        eff_acl_name:           "{{ acl_name           | default('',        true) | trim }}"
+        eff_csr_pl_name:        "{{ csr_pl_name        | default('CSR_LIST', true) | trim }}"
+        eff_local_asn:          "{{ local_asn          | default(398957,    true) }}"
+        eff_remove_acl:         "{{ remove_acl         | default(true,      true) }}"
+        eff_remove_static_routes:    "{{ remove_static_routes    | default(true, true) }}"
+        eff_remove_bgp_networks:     "{{ remove_bgp_networks     | default(true, true) }}"
+        eff_remove_bgp_neighbor:     "{{ remove_bgp_neighbor     | default(true, true) }}"
+        eff_remove_csr_list_entries: "{{ remove_csr_list_entries | default(true, true) }}"
+        eff_remove_inbound_pl:       "{{ remove_inbound_pl       | default(true, true) }}"
+        eff_remove_outbound_pl:      "{{ remove_outbound_pl      | default(true, true) }}"
+        eff_remove_inbound_rm:       "{{ remove_inbound_rm       | default(true, true) }}"
+        eff_remove_outbound_rm:      "{{ remove_outbound_rm      | default(true, true) }}"
+
     # ---------- Basic input validation ----------
     - name: Validate routing_type
       ansible.builtin.assert:
         that:
-          - routing_type is defined
-          - routing_type in ['dynamic', 'static']
+          - eff_routing_type in ['dynamic', 'static']
         fail_msg: "routing_type must be 'dynamic' or 'static'"
 
-    - name: Validate tunnel_id, tunnel_desc
+    - name: Validate tunnel_id, tunnel_desc, remote_peer_ip
       ansible.builtin.assert:
         that:
           - tunnel_id is defined and (tunnel_id | int) > 0
-          - tunnel_desc is defined and (tunnel_desc | length) > 0
-        fail_msg: "tunnel_id and tunnel_desc are required"
-
-    - name: Validate remote_peer_ip
-      ansible.builtin.assert:
-        that:
+          - (eff_tunnel_desc | length) > 0
           - remote_peer_ip is defined and (remote_peer_ip | length) > 0
-        fail_msg: "remote_peer_ip is required (must match the tunnel's 'tunnel destination')"
+        fail_msg: "tunnel_id, tunnel_desc, and remote_peer_ip are required"
 
-    # ---------- SAFETY GATE 1 ----------
+    # ---------- SAFETY GATE 1: confirm_tunnel_id must match ----------
     - name: SAFETY — operator must re-type tunnel_id in confirm_tunnel_id
       ansible.builtin.assert:
         that:
           - confirm_tunnel_id is defined
-          - (confirm_tunnel_id | string) == (tunnel_id | string)
-        fail_msg: >
-          REFUSING TO PROCEED. 'confirm_tunnel_id' must equal 'tunnel_id'
-          (tunnel_id={{ tunnel_id }}, confirm_tunnel_id={{ confirm_tunnel_id | default('<unset>') }}).
+          - (confirm_tunnel_id | int) == (tunnel_id | int)
+        fail_msg: >-
+          REFUSING TO PROCEED. confirm_tunnel_id ({{ confirm_tunnel_id | default('<unset>') }})
+          must equal tunnel_id ({{ tunnel_id }}).
 
-    # ---------- SAFETY GATE 2 ----------
+    # ---------- Derive effective object names (same logic as deploy) ----------
+    - name: Derive safe_desc & effective object names
+      ansible.builtin.set_fact:
+        safe_desc: "{{ eff_tunnel_desc | regex_replace('\\s+', '_') }}"
+
+    - name: Compute fallback names if blank
+      ansible.builtin.set_fact:
+        effective_keyring_name:       "{{ eff_keyring_name       if (eff_keyring_name       | length) > 0 else ('KEYRING_'    ~ safe_desc ~ '_T' ~ tunnel_id) }}"
+        effective_profile_name:       "{{ eff_profile_name       if (eff_profile_name       | length) > 0 else ('PROF_'       ~ safe_desc ~ '_T' ~ tunnel_id) }}"
+        effective_ipsec_profile_name: "{{ eff_ipsec_profile_name if (eff_ipsec_profile_name | length) > 0 else ('IPSEC_PROF_T' ~ tunnel_id) }}"
+        effective_acl_name:           "{{ eff_acl_name           if (eff_acl_name           | length) > 0 else safe_desc }}"
+
+    # ---------- SAFETY GATE 2: Tunnel must exist ----------
     - name: SAFETY — read running-config for Tunnel{{ tunnel_id }}
       cisco.ios.ios_command:
         commands: "show running-config interface Tunnel{{ tunnel_id }}"
       register: tun_exists
       failed_when: false
+      changed_when: false
 
     - name: SAFETY — abort if Tunnel{{ tunnel_id }} is not present
       ansible.builtin.assert:
         that:
           - "'interface Tunnel' ~ (tunnel_id | string) in (tun_exists.stdout[0] | default(''))"
-        fail_msg: >
+        fail_msg: >-
           Tunnel{{ tunnel_id }} does not exist on this device. Nothing to remove.
 
-    # ---------- SAFETY GATE 3 ----------
+    # ---------- SAFETY GATE 3: remote_peer_ip must match tunnel destination ----------
     - name: SAFETY — abort if remote_peer_ip does not match tunnel destination
       ansible.builtin.assert:
         that:
           - "'tunnel destination ' ~ remote_peer_ip in (tun_exists.stdout[0] | default(''))"
-        fail_msg: >
+        fail_msg: >-
           remote_peer_ip mismatch. Survey says {{ remote_peer_ip }}, but
           Tunnel{{ tunnel_id }} has a different 'tunnel destination'. Refusing to proceed.
 
-    # ---------- Normalize local_networks ----------
+    # ---------- Parse local_networks ----------
     - name: Build ln_entries (net, mask, bits) from local_networks
       ansible.builtin.set_fact:
         ln_entries: >-
@@ -92,84 +120,98 @@
           {%- endfor -%}
           {{ out }}
 
-    # ---------- Find this tunnel's CSR_LIST lines ----------
-    - name: Read current CSR_LIST entries (from running-config)
+    # ---------- CSR_LIST line discovery (IOS-include compatible) ----------
+    - name: Read current CSR_LIST entries (running-config)
       cisco.ios.ios_command:
-        commands: "show running-config | include ^ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} "
+        commands: "show running-config | include ip prefix-list {{ eff_csr_pl_name }} "
       register: pl_show
+      changed_when: false
       failed_when: false
 
     - name: Compute pl_remove_lines (full CSR_LIST lines matching ln_entries)
       ansible.builtin.set_fact:
         pl_remove_lines: >-
-          {%- set lines = (pl_show.stdout[0] | default('')).splitlines() -%}
           {%- set out = [] -%}
+          {%- set txt = pl_show.stdout[0] | default('') -%}
           {%- for e in (ln_entries | default([])) -%}
-          {%-   set needle = e.net ~ '/' ~ (e.bits | string) -%}
-          {%-   for ln in lines -%}
-          {%-     set lt = ln | trim -%}
-          {%-     if needle in lt and lt not in out -%}
-          {%-       set _ = out.append(lt) -%}
-          {%-     endif -%}
+          {%-   set pat = 'ip prefix-list ' ~ (eff_csr_pl_name | regex_escape) ~ ' seq \\d+ permit ' ~ (e.net | regex_escape) ~ '/' ~ (e.bits | string) ~ '(?:\\s+(?:le|ge)\\s+\\d+)*' -%}
+          {%-   for m in (txt | regex_findall(pat)) -%}
+          {%-     if m not in out -%}{%- set _ = out.append(m) -%}{%- endif -%}
           {%-   endfor -%}
           {%- endfor -%}
           {{ out }}
 
-    - name: Show what will be removed (debug)
+    - name: Show planned removal summary (debug)
       ansible.builtin.debug:
         msg:
-          tunnel_id: "{{ tunnel_id }}"
-          tunnel_desc: "{{ tunnel_desc }}"
-          remote_peer_ip: "{{ remote_peer_ip }}"
-          routing_type: "{{ routing_type }}"
-          bgp_neighbor_ip: "{{ bgp_neighbor_ip | default('<none>') }}"
-          ln_entries: "{{ ln_entries }}"
-          csr_pl_name: "{{ csr_pl_name | default('CSR_LIST', true) }}"
-          pl_remove_lines: "{{ pl_remove_lines }}"
+          tunnel_id:               "{{ tunnel_id }}"
+          tunnel_desc:             "{{ eff_tunnel_desc }}"
+          remote_peer_ip:          "{{ remote_peer_ip }}"
+          routing_type:            "{{ eff_routing_type }}"
+          bgp_neighbor_ip:         "{{ bgp_neighbor_ip | default('<none>') }}"
+          keyring_name:            "{{ effective_keyring_name }}"
+          profile_name:            "{{ effective_profile_name }}"
+          ipsec_profile_name:      "{{ effective_ipsec_profile_name }}"
+          acl_name:                "{{ effective_acl_name }}     (remove={{ eff_remove_acl }})"
+          local_asn:               "{{ eff_local_asn }}"
+          csr_pl_name:             "{{ eff_csr_pl_name }}"
+          ln_entries:              "{{ ln_entries }}"
+          pl_remove_lines:         "{{ pl_remove_lines }}"
+          remove_static_routes:    "{{ eff_remove_static_routes }}"
+          remove_bgp_networks:     "{{ eff_remove_bgp_networks }}"
+          remove_bgp_neighbor:     "{{ eff_remove_bgp_neighbor }}"
+          remove_csr_list_entries: "{{ eff_remove_csr_list_entries }}"
 
   tasks:
     # ------------------------------------------------------------------
     # Each "fragile" cleanup is its own task — failures don't cascade.
-    # Order: BGP first (depends on tunnel), then static routes,
-    # then CSR_LIST, then the template push for the rest.
+    # Order: BGP network → BGP neighbor → static routes → CSR_LIST
+    #        → template push for the rest.
     # ------------------------------------------------------------------
 
     - name: Remove BGP network statements
       cisco.ios.ios_config:
         parents:
-          - "router bgp {{ local_asn | default(398957) }}"
+          - "router bgp {{ eff_local_asn }}"
           - "address-family ipv4"
-        lines: ["no network {{ item.net }} mask {{ item.mask }}"]
+        lines: "no network {{ item.net }} mask {{ item.mask }}"
       loop: "{{ ln_entries | default([]) }}"
+      when:
+        - eff_remove_bgp_networks | bool
+        - (ln_entries | default([]) | length) > 0
       failed_when: false
-      when: (ln_entries | default([]) | length) > 0
 
     - name: Remove BGP neighbor (dynamic mode)
       cisco.ios.ios_config:
-        parents: ["router bgp {{ local_asn | default(398957) }}"]
-        lines: ["no neighbor {{ bgp_neighbor_ip }}"]
-      failed_when: false
+        parents: "router bgp {{ eff_local_asn }}"
+        lines: "no neighbor {{ bgp_neighbor_ip }}"
       when:
-        - routing_type | default('dynamic') == 'dynamic'
-        - bgp_neighbor_ip is defined
-        - (bgp_neighbor_ip | length) > 0
+        - eff_remove_bgp_neighbor | bool
+        - eff_routing_type == 'dynamic'
+        - bgp_neighbor_ip is defined and (bgp_neighbor_ip | length) > 0
+      failed_when: false
 
     - name: Remove static routes via Tunnel{{ tunnel_id }} (static mode)
       cisco.ios.ios_config:
-        lines:
-          - "no ip route {{ item.net }} {{ item.mask }} Tunnel{{ tunnel_id }} name {{ (tunnel_desc | regex_replace('\\s+', '_')) }}_NET{{ idx }}"
+        lines: "no ip route {{ item.net }} {{ item.mask }} Tunnel{{ tunnel_id }} name {{ safe_desc }}_NET{{ idx }}"
       loop: "{{ ln_entries | default([]) }}"
       loop_control:
         index_var: idx0
       vars:
         idx: "{{ idx0 + 1 }}"
+      when:
+        - eff_remove_static_routes | bool
+        - eff_routing_type == 'static'
+        - (ln_entries | default([]) | length) > 0
       failed_when: false
-      when: routing_type == 'static'
 
     - name: Remove CSR_LIST entries for this tunnel's networks
       cisco.ios.ios_config:
-        lines: ["no {{ item }}"]
+        lines: "no {{ item }}"
       loop: "{{ pl_remove_lines | default([]) }}"
+      when:
+        - eff_remove_csr_list_entries | bool
+        - (pl_remove_lines | default([]) | length) > 0
       failed_when: false
 
     # ------------------------------------------------------------------
@@ -180,11 +222,13 @@
       cisco.ios.ios_config:
         src: templates/remove_tunnel.j2
       register: cfg
+      vars:
+        routing_type: "{{ eff_routing_type }}"
 
     - name: Save startup-config
       cisco.ios.ios_command:
         commands: write memory
-      changed_when: true
+      when: cfg.changed
 
     - name: Show removed lines (template push)
       ansible.builtin.debug:
@@ -209,8 +253,15 @@
     - name: Verify — CSR_LIST state
       cisco.ios.ios_command:
         commands:
-          - "show ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }}"
+          - "show ip prefix-list {{ eff_csr_pl_name }}"
       register: vfy_pl
+      changed_when: false
+
+    - name: Verify — IKEv2 / IPsec residuals
+      cisco.ios.ios_command:
+        commands:
+          - "show running-config | include ^crypto ikev2 keyring {{ effective_keyring_name }}$|^crypto ikev2 profile {{ effective_profile_name }}$|^crypto ipsec profile {{ effective_ipsec_profile_name }}$|^ip access-list extended {{ effective_acl_name }}$"
+      register: vfy_residual
       changed_when: false
 
     - name: Print verification — interface check (should be empty)
@@ -224,3 +275,7 @@
     - name: Print verification — CSR_LIST after removal
       ansible.builtin.debug:
         msg: "{{ vfy_pl.stdout[0].splitlines() }}"
+
+    - name: Print verification — residual crypto/ACL objects (should be empty)
+      ansible.builtin.debug:
+        msg: "{{ vfy_residual.stdout[0].splitlines() }}"
