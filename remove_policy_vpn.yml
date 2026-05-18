@@ -1,4 +1,3 @@
-
 ---
 - name: Remove Policy-Based IKEv2/IPsec VPN from Cisco CSR
   hosts: all
@@ -108,9 +107,11 @@
           {{ out }}
 
     # ---------- Read CSR_LIST and capture FULL matching lines ----------
+    # IOS pipe `| include` doesn't reliably support ^ or \b — match on trailing
+    # space after the name to ensure exact-name match without anchors.
     - name: Read current CSR_LIST state
       cisco.ios.ios_command:
-        commands: "show running-config | include ^ip prefix-list {{ eff_csr_pl_name }}\\b"
+        commands: "show running-config | include ip prefix-list {{ eff_csr_pl_name }} "
       register: pl_show
       changed_when: false
       failed_when: false
