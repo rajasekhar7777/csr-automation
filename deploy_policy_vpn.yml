@@ -4,83 +4,86 @@
   gather_facts: false
 
   pre_tasks:
-    # ---------- Whitespace normalization + empty-string defaults ----------
-    - name: Normalize critical text inputs
+    # ---------- Whitespace normalization + empty-string-safe defaults ----------
+    # NOTE: AWX extra-vars override set_fact, so we store normalized values
+    # under NEW eff_* names that are not in the survey.
+    - name: Normalize critical inputs into eff_* facts
       ansible.builtin.set_fact:
-        crypto_map_desc: "{{ crypto_map_desc | default('')              | trim }}"
-        transform_set:   "{{ transform_set   | default('AES256-SHA256', true) | trim }}"
-        crypto_map_name: "{{ crypto_map_name | default('MYMAP',         true) | trim }}"
-        wan_interface:   "{{ wan_interface   | default('GigabitEthernet1', true) | trim }}"
-        csr_pl_name:     "{{ csr_pl_name     | default('CSR_LIST',      true) | trim }}"
-        ikev2_lifetime:  "{{ ikev2_lifetime  | default(28800,           true) }}"
-        keyring_name:    "{{ keyring_name    | default('',              true) | trim }}"
-        profile_name:    "{{ profile_name    | default('',              true) | trim }}"
-        match_identity_remote_type:  "{{ match_identity_remote_type  | default('address', true) | trim | lower }}"
-        match_identity_remote_value: "{{ match_identity_remote_value | default('',        true) | trim }}"
-        identity_local_type:         "{{ identity_local_type         | default('',        true) | trim | lower }}"
-        identity_local_value:        "{{ identity_local_value        | default('',        true) | trim }}"
+        eff_crypto_map_desc: "{{ crypto_map_desc | default('')                | trim }}"
+        eff_crypto_map_name: "MYMAP"
+        eff_wan_interface:   "GigabitEthernet1"
+        eff_csr_pl_name:     "{{ csr_pl_name     | default('CSR_LIST',        true) | trim }}"
+        eff_keyring_name:    "{{ keyring_name    | default('',                true) | trim }}"
+        eff_profile_name:    "{{ profile_name    | default('',                true) | trim }}"
+        eff_acl_name:        "{{ acl_name        | default('',                true) | trim }}"
+        eff_transform_set:   "{{ transform_set   | default('AES256-SHA256',   true) | trim }}"
+        eff_ikev2_lifetime:  "{{ ikev2_lifetime  | default(28800,             true) }}"
+        eff_local_asn:       "{{ local_asn       | default(398957,            true) }}"
+        eff_match_identity_remote_type:  "{{ match_identity_remote_type  | default('address', true) | trim | lower }}"
+        eff_match_identity_remote_value: "{{ match_identity_remote_value | default('',        true) | trim }}"
+        eff_identity_local_type:         "{{ identity_local_type         | default('',        true) | trim | lower }}"
+        eff_identity_local_value:        "{{ identity_local_value        | default('',        true) | trim }}"
+        eff_vpn_psk:                     "{{ vpn_psk                     | default('',        true) }}"
 
     # ---------- Validation ----------
     - name: Validate required core fields
       ansible.builtin.assert:
         that:
-          - crypto_map_desc is defined and (crypto_map_desc | length) > 0
-          - crypto_map_id   is defined and (crypto_map_id | int) > 0
-          - remote_peer_ip  is defined and (remote_peer_ip | length) > 0
-          - acl_entries     is defined and (acl_entries | length) > 0
-        fail_msg: >
-          Required: crypto_map_desc, crypto_map_id (>0), remote_peer_ip, acl_entries.
-
-    - name: Validate local_networks (always static routing in policy-based)
-      ansible.builtin.assert:
-        that:
+          - eff_crypto_map_desc is defined and (eff_crypto_map_desc | length) > 0
+          - crypto_map_id is defined and (crypto_map_id | int) > 0
+          - remote_peer_ip is defined and (remote_peer_ip | length) > 0
+          - acl_entries is defined and (acl_entries | length) > 0
           - local_networks is defined and (local_networks | length) > 0
-        fail_msg: "local_networks is required (one CIDR or 'NET MASK' per line)"
+          - (eff_vpn_psk | length) > 0
+        fail_msg: >
+          Required: crypto_map_desc, crypto_map_id (>0), remote_peer_ip,
+          acl_entries, local_networks, vpn_psk.
 
     - name: Validate transform_set
       ansible.builtin.assert:
         that:
-          - transform_set in ['AES256-SHA256', 'AES256-SHA1', 'AES128-SHA1']
+          - eff_transform_set in ['AES256-SHA256', 'AES256-SHA1', 'AES128-SHA1']
         fail_msg: "transform_set must be one of AES256-SHA256, AES256-SHA1, AES128-SHA1"
 
     - name: Validate match_identity_remote_type
       ansible.builtin.assert:
         that:
-          - match_identity_remote_type in ['address', 'fqdn']
+          - eff_match_identity_remote_type in ['address', 'fqdn']
         fail_msg: "match_identity_remote_type must be 'address' or 'fqdn'"
 
     - name: Validate identity_local_type (optional)
       ansible.builtin.assert:
         that:
-          - (identity_local_type | length) == 0
-            or identity_local_type in ['address', 'fqdn']
+          - (eff_identity_local_type | length) == 0
+            or eff_identity_local_type in ['address', 'fqdn']
         fail_msg: "identity_local_type must be 'address' or 'fqdn' (or blank)"
 
-    # ---------- Parse peers_raw textarea ----------
-    # Format per line, pipe-separated:
-    #   name|address|psk
-    #   name|address|psk_local|psk_remote
-    - name: Build peers_list from peers_raw
+    # ---------- Derive object names ----------
+    - name: Derive safe_desc & effective object names
       ansible.builtin.set_fact:
-        peers_list: >-
-          {%- set out = [] -%}
-          {%- for raw in (peers_raw | default('')).splitlines() -%}
-          {%-   set line = raw | trim -%}
-          {%-   if line | length > 0 and not line.startswith('#') -%}
-          {%-     set f = line.split('|') | map('trim') | list -%}
-          {%-     if (f | length) == 3 -%}
-          {%-       set _ = out.append({'name': f[0], 'address': f[1], 'psk': f[2]}) -%}
-          {%-     elif (f | length) == 4 -%}
-          {%-       set _ = out.append({'name': f[0], 'address': f[1], 'psk_local': f[2], 'psk_remote': f[3]}) -%}
-          {%-     endif -%}
-          {%-   endif -%}
-          {%- endfor -%}
-          {{ out }}
+        safe_desc: "{{ eff_crypto_map_desc | regex_replace('\\s+', '_') }}"
+
+    - name: Compute fallback names if blank
+      ansible.builtin.set_fact:
+        effective_acl_name:     "{{ eff_acl_name     if (eff_acl_name     | length) > 0 else safe_desc }}"
+        effective_keyring_name: "{{ eff_keyring_name if (eff_keyring_name | length) > 0 else ('KEYRING_' ~ safe_desc) }}"
+        effective_profile_name: "{{ eff_profile_name if (eff_profile_name | length) > 0 else ('PROF_'    ~ safe_desc) }}"
+
+    # ---------- Build single-peer list (symmetric PSK) ----------
+    # Peer name  = crypto_map_desc (safe_desc)
+    # Peer addr  = remote_peer_ip
+    # PSK        = vpn_psk (symmetric — same on both sides)
+    - name: Build peers_list (single peer, symmetric PSK)
+      ansible.builtin.set_fact:
+        peers_list:
+          - name:    "{{ safe_desc }}"
+            address: "{{ remote_peer_ip }}"
+            psk:     "{{ eff_vpn_psk }}"
 
     # ---------- CSR_LIST seq discovery ----------
     - name: Read current CSR_LIST state
       cisco.ios.ios_command:
-        commands: "show ip prefix-list {{ csr_pl_name }}"
+        commands: "show ip prefix-list {{ eff_csr_pl_name }}"
       register: pl_show
       failed_when: false
 
@@ -99,23 +102,26 @@
     - name: Show derived facts (debug)
       ansible.builtin.debug:
         msg:
-          crypto_map_name: "{{ crypto_map_name }}"
-          crypto_map_id:   "{{ crypto_map_id }}"
-          crypto_map_desc: "{{ crypto_map_desc }}"
-          remote_peer_ip:  "{{ remote_peer_ip }}"
-          transform_set:   "{{ transform_set }}"
-          ikev2_lifetime:  "{{ ikev2_lifetime }}"
-          wan_interface:   "{{ wan_interface }}"
-          csr_pl_name:     "{{ csr_pl_name }}"
-          keyring_name:    "{{ keyring_name | default('KEYRING_' ~ (crypto_map_desc | regex_replace('\\s+','_')), true) }}"
-          profile_name:    "{{ profile_name | default('PROF_'    ~ (crypto_map_desc | regex_replace('\\s+','_')), true) }}"
-          match_identity_remote_type:  "{{ match_identity_remote_type }}"
-          match_identity_remote_value: "{{ match_identity_remote_value }}"
-          identity_local_type:         "{{ identity_local_type }}"
-          identity_local_value:        "{{ identity_local_value }}"
-          peers_count:     "{{ peers_list | length }}"
-          peers_list:      "{{ peers_list }}"
-          pl_next_seq:     "{{ pl_next_seq }}"
+          crypto_map_name:   "{{ eff_crypto_map_name }}"
+          crypto_map_id:     "{{ crypto_map_id }}"
+          crypto_map_desc:   "{{ eff_crypto_map_desc }}"
+          safe_desc:         "{{ safe_desc }}"
+          remote_peer_ip:    "{{ remote_peer_ip }}"
+          wan_interface:     "{{ eff_wan_interface }}"
+          transform_set:     "{{ eff_transform_set }}"
+          ikev2_lifetime:    "{{ eff_ikev2_lifetime }}"
+          local_asn:         "{{ eff_local_asn }}"
+          csr_pl_name:       "{{ eff_csr_pl_name }}"
+          keyring_name:      "{{ effective_keyring_name }}"
+          profile_name:      "{{ effective_profile_name }}"
+          acl_name:          "{{ effective_acl_name }}"
+          match_identity_remote_type:  "{{ eff_match_identity_remote_type }}"
+          match_identity_remote_value: "{{ eff_match_identity_remote_value }}"
+          identity_local_type:         "{{ eff_identity_local_type }}"
+          identity_local_value:        "{{ eff_identity_local_value }}"
+          peers_count:       "{{ peers_list | length }}"
+          peers_list:        "{{ peers_list }}"
+          pl_next_seq:       "{{ pl_next_seq }}"
 
   tasks:
     - name: Push generated config
@@ -137,18 +143,18 @@
     - name: Verify — crypto map
       cisco.ios.ios_command:
         commands:
-          - "show running-config | section crypto map {{ crypto_map_name }}"
+          - "show running-config | section crypto map {{ eff_crypto_map_name }}"
       register: vfy_cm
       changed_when: false
 
     - name: Verify — WAN interface (crypto map attached?)
       cisco.ios.ios_command:
         commands:
-          - "show running-config interface {{ wan_interface }}"
+          - "show running-config interface {{ eff_wan_interface }}"
       register: vfy_wan
       changed_when: false
 
-    - name: Verify — running-config BGP section
+    - name: Verify — BGP section
       cisco.ios.ios_command:
         commands:
           - "show running-config | section bgp"
@@ -158,7 +164,7 @@
     - name: Verify — CSR_LIST
       cisco.ios.ios_command:
         commands:
-          - "show ip prefix-list {{ csr_pl_name }}"
+          - "show ip prefix-list {{ eff_csr_pl_name }}"
       register: vfy_pl
       changed_when: false
 
