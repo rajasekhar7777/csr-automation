@@ -1,16 +1,16 @@
-
 {# ====================================================================
    Policy-based IKEv2/IPsec VPN (crypto-map on WAN)
+   Single-peer, symmetric PSK model.
+   Relies on playbook facts:
+     eff_crypto_map_name, eff_wan_interface, eff_transform_set,
+     eff_ikev2_lifetime, eff_local_asn, eff_csr_pl_name,
+     eff_match_identity_remote_type, eff_match_identity_remote_value,
+     eff_identity_local_type, eff_identity_local_value,
+     effective_acl_name, effective_keyring_name, effective_profile_name,
+     safe_desc, peers_list, pl_next_seq
+   And survey vars: crypto_map_id, crypto_map_desc, remote_peer_ip,
+     acl_entries, local_networks, csr_pl_lege (optional)
    ==================================================================== #}
-
-{% set safe_desc          = crypto_map_desc | regex_replace('\\s+', '_') %}
-{% set effective_acl_name = acl_name        if (acl_name        is defined and acl_name        | length > 0) else safe_desc %}
-{% set effective_keyring  = keyring_name    if (keyring_name    is defined and keyring_name    | length > 0) else 'KEYRING_' ~ safe_desc %}
-{% set effective_profile  = profile_name    if (profile_name    is defined and profile_name    | length > 0) else 'PROF_'    ~ safe_desc %}
-{% set effective_xform    = transform_set   | default('AES256-SHA256', true) %}
-{% set effective_lifetime = ikev2_lifetime  | default(28800, true) %}
-{% set effective_mapname  = crypto_map_name | default('MYMAP', true) %}
-{% set effective_wanif    = wan_interface   | default('GigabitEthernet1', true) %}
 
 {% set _octet_bits = {'0':0,'128':1,'192':2,'224':3,'240':4,'248':5,'252':6,'254':7,'255':8} %}
 
@@ -44,19 +44,6 @@
 {% endfor %}
 {% endif %}
 
-{% set _peers = [] %}
-{% if peers_list is defined and peers_list is iterable and (peers_list | length > 0) %}
-{% set _peers = peers_list %}
-{% else %}
-{% set _p = {'name': safe_desc, 'address': remote_peer_ip} %}
-{% if psk_local  is defined and psk_local  | length > 0 %}{% set _p = _p | combine({'psk_local':  psk_local })  %}{% endif %}
-{% if psk_remote is defined and psk_remote | length > 0 %}{% set _p = _p | combine({'psk_remote': psk_remote}) %}{% endif %}
-{% if (psk_local  is not defined or (psk_local  | length) == 0) and (psk_remote is not defined or (psk_remote | length) == 0) %}
-{% set _p = _p | combine({'psk': vpn_psk}) %}
-{% endif %}
-{% set _peers = [_p] %}
-{% endif %}
-
 crypto ipsec transform-set AES256-SHA256 esp-aes 256 esp-sha256-hmac
  mode tunnel
 crypto ipsec transform-set AES256-SHA1 esp-aes 256 esp-sha-hmac
@@ -72,34 +59,30 @@ crypto ikev2 proposal azure-proposal-VNG
 crypto ikev2 policy azure-policy-VNG
  proposal azure-proposal-VNG
 
-crypto ikev2 keyring {{ effective_keyring }}
-{% for p in _peers %}
+crypto ikev2 keyring {{ effective_keyring_name }}
+{% for p in peers_list %}
  peer {{ p.name }}
   address {{ p.address }}
-{% if p.psk        is defined and p.psk        | length > 0 %}  pre-shared-key {{ p.psk }}{% endif %}
-{% if p.psk_local  is defined and p.psk_local  | length > 0 %}  pre-shared-key local  {{ p.psk_local }}{% endif %}
-{% if p.psk_remote is defined and p.psk_remote | length > 0 %}  pre-shared-key remote {{ p.psk_remote }}{% endif %}
+  pre-shared-key {{ p.psk }}
 {% endfor %}
 
-{% set _mir_type  = (match_identity_remote_type  | default('address', true) | lower) %}
-{% set _mir_value = match_identity_remote_value | default(remote_peer_ip, true) %}
-crypto ikev2 profile {{ effective_profile }}
-{% if _mir_type == 'address' %}
- match identity remote address {{ _mir_value }} 255.255.255.255
+crypto ikev2 profile {{ effective_profile_name }}
+{% if eff_match_identity_remote_type == 'address' %}
+ match identity remote address {{ eff_match_identity_remote_value if (eff_match_identity_remote_value | length) > 0 else remote_peer_ip }} 255.255.255.255
 {% else %}
- match identity remote fqdn {{ _mir_value }}
+ match identity remote fqdn {{ eff_match_identity_remote_value }}
 {% endif %}
  authentication remote pre-share
- authentication local  pre-share
- keyring local {{ effective_keyring }}
-{% if identity_local_type is defined and (identity_local_type | length) > 0 and identity_local_value is defined and (identity_local_value | length) > 0 %}
-{% if (identity_local_type | lower) == 'address' %}
- identity local address {{ identity_local_value }}
+ authentication local pre-share
+ keyring local {{ effective_keyring_name }}
+{% if (eff_identity_local_type | length) > 0 and (eff_identity_local_value | length) > 0 %}
+{% if eff_identity_local_type == 'address' %}
+ identity local address {{ eff_identity_local_value }}
 {% else %}
- identity local fqdn {{ identity_local_value }}
+ identity local fqdn {{ eff_identity_local_value }}
 {% endif %}
 {% endif %}
- lifetime {{ effective_lifetime }}
+ lifetime {{ eff_ikev2_lifetime }}
  dpd 10 5 on-demand
 
 {% if acl_entries is defined and acl_entries | length > 0 %}
@@ -110,27 +93,27 @@ ip access-list extended {{ effective_acl_name }}
 {% endfor %}
 {% endif %}
 
-crypto map {{ effective_mapname }} {{ crypto_map_id }} ipsec-isakmp
- description {{ crypto_map_desc }}
+crypto map {{ eff_crypto_map_name }} {{ crypto_map_id }} ipsec-isakmp
+ description {{ eff_crypto_map_desc }}
  set peer {{ remote_peer_ip }}
- set transform-set {{ effective_xform }}
- set ikev2-profile {{ effective_profile }}
+ set transform-set {{ eff_transform_set }}
+ set ikev2-profile {{ effective_profile_name }}
  match address {{ effective_acl_name }}
 
-interface {{ effective_wanif }}
- crypto map {{ effective_mapname }}
+interface {{ eff_wan_interface }}
+ crypto map {{ eff_crypto_map_name }}
 
 ip route {{ remote_peer_ip }} 255.255.255.255 10.138.1.1 name WAN_{{ safe_desc }}
 
 {% if ln_entries | length > 0 %}
 {% for e in ln_entries %}
-ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }} seq {{ (pl_next_seq | int) + (loop.index0 * 5) }} permit {{ e.net }}/{{ e.bits }}{% if csr_pl_lege is defined and (csr_pl_lege | trim | length) > 0 %} {{ csr_pl_lege | trim }}{% endif %}
+ip prefix-list {{ eff_csr_pl_name }} seq {{ (pl_next_seq | int) + (loop.index0 * 5) }} permit {{ e.net }}/{{ e.bits }}{% if csr_pl_lege is defined and (csr_pl_lege | trim | length) > 0 %} {{ csr_pl_lege | trim }}{% endif %}
 
 {% endfor %}
 {% endif %}
 
 {% if ln_entries | length > 0 %}
-router bgp {{ local_asn | default(398957, true) }}
+router bgp {{ eff_local_asn }}
  bgp log-neighbor-changes
  address-family ipv4
 {% for e in ln_entries %}
@@ -144,4 +127,3 @@ router bgp {{ local_asn | default(398957, true) }}
 ip route {{ e.net }} {{ e.mask }} 10.138.1.1 name {{ safe_desc }}_NET{{ loop.index }}
 {% endfor %}
 {% endif %}
-
