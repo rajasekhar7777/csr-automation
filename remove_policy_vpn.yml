@@ -7,19 +7,20 @@
     # ---------- Whitespace normalization + empty-string-safe defaults ----------
     # NOTE: AWX survey values come in as extra-vars (highest precedence), so we
     # store normalized values under NEW names (eff_*) to avoid being shadowed.
+    # crypto_map_name and wan_interface are hard-coded (no longer in survey).
     - name: Normalize critical text inputs into eff_* facts
       ansible.builtin.set_fact:
-        eff_crypto_map_desc: "{{ crypto_map_desc | default('')                | trim }}"
-        eff_crypto_map_name: "{{ crypto_map_name | default('MYMAP',           true) | trim }}"
-        eff_wan_interface:   "{{ wan_interface   | default('GigabitEthernet1', true) | trim }}"
-        eff_csr_pl_name:     "{{ csr_pl_name     | default('CSR_LIST',        true) | trim }}"
-        eff_keyring_name:    "{{ keyring_name    | default('',                true) | trim }}"
-        eff_profile_name:    "{{ profile_name    | default('',                true) | trim }}"
-        eff_acl_name:        "{{ acl_name        | default('',                true) | trim }}"
-        eff_local_asn:       "{{ local_asn       | default(398957,            true) }}"
-        eff_remove_acl:      "{{ remove_acl      | default(true,              true) }}"
-        eff_remove_profile:  "{{ remove_profile  | default(true,              true) }}"
-        eff_remove_keyring:  "{{ remove_keyring  | default(true,              true) }}"
+        eff_crypto_map_desc: "{{ crypto_map_desc | default('')             | trim }}"
+        eff_crypto_map_name: "MYMAP"
+        eff_wan_interface:   "GigabitEthernet1"
+        eff_csr_pl_name:     "{{ csr_pl_name     | default('CSR_LIST', true) | trim }}"
+        eff_keyring_name:    "{{ keyring_name    | default('',         true) | trim }}"
+        eff_profile_name:    "{{ profile_name    | default('',         true) | trim }}"
+        eff_acl_name:        "{{ acl_name        | default('',         true) | trim }}"
+        eff_local_asn:       "{{ local_asn       | default(398957,     true) }}"
+        eff_remove_acl:      "{{ remove_acl      | default(true,       true) }}"
+        eff_remove_profile:  "{{ remove_profile  | default(true,       true) }}"
+        eff_remove_keyring:  "{{ remove_keyring  | default(true,       true) }}"
         eff_remove_static_routes:    "{{ remove_static_routes    | default(true, true) }}"
         eff_remove_bgp_networks:     "{{ remove_bgp_networks     | default(true, true) }}"
         eff_remove_csr_list_entries: "{{ remove_csr_list_entries | default(true, true) }}"
@@ -29,7 +30,7 @@
       ansible.builtin.assert:
         that:
           - eff_crypto_map_desc is defined and (eff_crypto_map_desc | length) > 0
-          - crypto_map_id   is defined and (crypto_map_id | int) > 0
+          - crypto_map_id is defined and (crypto_map_id | int) > 0
           - confirm_crypto_map_id is defined and (confirm_crypto_map_id | int) > 0
         fail_msg: >
           Required: crypto_map_desc, crypto_map_id (>0), confirm_crypto_map_id (>0).
