@@ -1,15 +1,6 @@
 {# ====================================================================
    IKEv2 / IPsec route-based VPN tunnel
    Hard-coded: IKEv2, IPsec route-based, wan=GigabitEthernet1, gw=10.138.1.1
-   Relies on playbook facts (eff_* / effective_*):
-     eff_tunnel_desc, eff_ikev2_lifetime, eff_local_asn, eff_csr_pl_name,
-     eff_match_identity_remote_type, eff_match_identity_remote_value,
-     eff_identity_local_type, eff_identity_local_value,
-     effective_keyring_name, effective_profile_name, effective_ipsec_profile_name,
-     effective_acl_name, effective_sla_target, safe_desc, pl_next_seq
-   And survey vars: tunnel_id, tunnel_local_ip, remote_peer_ip, vpn_psk,
-     acl_entries, local_networks, routing_type, bgp_neighbor_ip, remote_asn,
-     inbound_*, outbound_*, csr_pl_lege
    ==================================================================== #}
 
 {% set _octet_bits = {'0':0,'128':1,'192':2,'224':3,'240':4,'248':5,'252':6,'254':7,'255':8} %}
@@ -44,7 +35,6 @@
 {% endfor %}
 {% endif %}
 
-{# ---- Crypto Foundation (IKEv2 hard-coded) ---- #}
 crypto ikev2 proposal azure-proposal-VNG
  encryption aes-cbc-256 aes-cbc-128
  integrity sha1 sha256
@@ -85,7 +75,6 @@ crypto ipsec profile {{ effective_ipsec_profile_name }}
  set pfs group20
  set ikev2-profile {{ effective_profile_name }}
 
-{# ---- ACL ---- #}
 {% if acl_entries is defined and acl_entries | length > 0 %}
 {% set acl_lines = acl_entries.splitlines() | map('trim') | reject('equalto','') | list %}
 ip access-list extended {{ effective_acl_name }}
@@ -94,7 +83,6 @@ ip access-list extended {{ effective_acl_name }}
 {% endfor %}
 {% endif %}
 
-{# ---- Tunnel interface (route-based hard-coded: tunnel mode ipsec ipv4) ---- #}
 interface Tunnel{{ tunnel_id }}
  description {{ eff_tunnel_desc }}
  ip address {{ tunnel_local_ip }} 255.255.255.252
@@ -107,7 +95,6 @@ interface Tunnel{{ tunnel_id }}
  ip access-group {{ effective_acl_name }} in
 {% endif %}
 
-{# ---- IP SLA ---- #}
 ip sla {{ tunnel_id }}
  icmp-echo {{ effective_sla_target }} source-interface Tunnel{{ tunnel_id }}
  frequency 5
@@ -116,7 +103,6 @@ track {{ tunnel_id }} ip sla {{ tunnel_id }} reachability
 
 ip route {{ remote_peer_ip }} 255.255.255.255 10.138.1.1 name WAN_ROUTE_T{{ tunnel_id }}
 
-{# ---- Inbound/Outbound prefix-list & route-map (DYNAMIC mode only) ---- #}
 {% if routing_type == 'dynamic'
       and inbound_pl_name is defined and inbound_pl_name | length > 0
       and inbound_prefixes is defined and inbound_prefixes | length > 0 %}
@@ -146,7 +132,6 @@ route-map {{ outbound_rm_name }} permit 10
  match ip address prefix-list {{ outbound_pl_name }}
 {% endif %}
 
-{# ---- CSR_LIST prefix-list — one entry per local network (BOTH modes) ---- #}
 {% if ln_entries | length > 0 %}
 {% for e in ln_entries %}
 ip prefix-list {{ eff_csr_pl_name }} seq {{ (pl_next_seq | int) + (loop.index0 * 5) }} permit {{ e.net }}/{{ e.bits }}{% if csr_pl_lege is defined and (csr_pl_lege | trim | length) > 0 %} {{ csr_pl_lege | trim }}{% endif %}
@@ -154,7 +139,6 @@ ip prefix-list {{ eff_csr_pl_name }} seq {{ (pl_next_seq | int) + (loop.index0 *
 {% endfor %}
 {% endif %}
 
-{# ---- BGP — always when local_networks is set; plus neighbor in dynamic mode ---- #}
 {% set want_bgp = (routing_type == 'dynamic') or (ln_entries | length > 0) %}
 {% if want_bgp %}
 router bgp {{ eff_local_asn }}
@@ -186,7 +170,6 @@ router bgp {{ eff_local_asn }}
  exit-address-family
 {% endif %}
 
-{# ---- Static routes (static mode only) ---- #}
 {% if routing_type == 'static' and ln_entries | length > 0 %}
 {% for e in ln_entries %}
 ip route {{ e.net }} {{ e.mask }} Tunnel{{ tunnel_id }} name {{ safe_desc }}_NET{{ loop.index }}
