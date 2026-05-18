@@ -1,43 +1,60 @@
-{# ======= IKEv2 / IPsec route-based VPN tunnel — REMOVAL (safe items only) ======= #}
-{# BGP, CSR_LIST entries, and static routes are handled by the playbook tasks.    #}
 
-{% set safe_desc = tunnel_desc | regex_replace('\\s+', '_') %}
-{% set effective_acl_name = acl_name if (acl_name is defined and acl_name | length > 0) else safe_desc %}
+{# ====================================================================
+   IKEv2 / IPsec route-based VPN tunnel — REMOVAL (safe items only)
+
+   BGP networks/neighbor, static routes, and CSR_LIST entries are
+   handled by independent playbook tasks (for failure isolation).
+
+   This template removes:
+     - Tunnel interface
+     - WAN host-route to remote peer
+     - IP SLA + track
+     - IPsec profile, IKEv2 profile, IKEv2 keyring
+     - ACL (if eff_remove_acl=true)
+     - Dynamic-mode inbound/outbound prefix-list & route-map
+
+   Relies on playbook facts:
+     eff_routing_type, eff_remove_acl, eff_remove_inbound_pl,
+     eff_remove_outbound_pl, eff_remove_inbound_rm, eff_remove_outbound_rm,
+     effective_keyring_name, effective_profile_name,
+     effective_ipsec_profile_name, effective_acl_name, safe_desc
+   And survey vars: tunnel_id, remote_peer_ip,
+     inbound_pl_name, outbound_pl_name, inbound_rm_name, outbound_rm_name
+   ==================================================================== #}
 
 {# ---- Tunnel interface (one shot removes interface + all sub-config) ---- #}
 no interface Tunnel{{ tunnel_id }}
 
-{# ---- Static route to remote peer ---- #}
-no ip route {{ remote_peer_ip }} 255.255.255.255 10.138.1.1
+{# ---- WAN host-route to remote peer ---- #}
+no ip route {{ remote_peer_ip }} 255.255.255.255 10.138.1.1 name WAN_ROUTE_T{{ tunnel_id }}
 
 {# ---- IP SLA + track ---- #}
 no ip sla schedule {{ tunnel_id }}
 no ip sla {{ tunnel_id }}
 no track {{ tunnel_id }}
 
-{# ---- Crypto stack ---- #}
-no crypto ipsec profile IPSEC_PROF_T{{ tunnel_id }}
-no crypto ikev2 profile PROF_T{{ tunnel_id }}
-no crypto ikev2 keyring KEYRING_T{{ tunnel_id }}
+{# ---- Crypto stack (user-defined names) ---- #}
+no crypto ipsec profile {{ effective_ipsec_profile_name }}
+no crypto ikev2 profile {{ effective_profile_name }}
+no crypto ikev2 keyring {{ effective_keyring_name }}
 
-{# ---- ACL (remove if acl_entries OR acl_name was provided) ---- #}
-{% if (acl_entries is defined and acl_entries | length > 0)
-      or (acl_name is defined and acl_name | length > 0) %}
+{# ---- ACL ---- #}
+{% if eff_remove_acl | bool %}
 no ip access-list extended {{ effective_acl_name }}
 {% endif %}
 
 {# ---- Inbound/Outbound prefix-lists & route-maps (DYNAMIC only) ---- #}
-{% if routing_type | default('dynamic') == 'dynamic' %}
-{% if inbound_pl_name is defined and inbound_pl_name | length > 0 %}
+{% if eff_routing_type == 'dynamic' %}
+{% if eff_remove_inbound_pl | bool and inbound_pl_name is defined and (inbound_pl_name | length) > 0 %}
 no ip prefix-list {{ inbound_pl_name }}
 {% endif %}
-{% if outbound_pl_name is defined and outbound_pl_name | length > 0 %}
+{% if eff_remove_outbound_pl | bool and outbound_pl_name is defined and (outbound_pl_name | length) > 0 %}
 no ip prefix-list {{ outbound_pl_name }}
 {% endif %}
-{% if inbound_rm_name is defined and inbound_rm_name | length > 0 %}
+{% if eff_remove_inbound_rm | bool and inbound_rm_name is defined and (inbound_rm_name | length) > 0 %}
 no route-map {{ inbound_rm_name }}
 {% endif %}
-{% if outbound_rm_name is defined and outbound_rm_name | length > 0 %}
+{% if eff_remove_outbound_rm | bool and outbound_rm_name is defined and (outbound_rm_name | length) > 0 %}
 no route-map {{ outbound_rm_name }}
 {% endif %}
 {% endif %}
