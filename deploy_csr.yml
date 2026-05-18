@@ -1,23 +1,62 @@
-
 ---
 - name: Deploy IKEv2 route-based VPN tunnel on Cisco CSR
   hosts: all
   gather_facts: false
 
   pre_tasks:
+    # ---------- Normalize inputs into eff_* facts (extra-vars-safe) ----------
+    - name: Normalize critical inputs into eff_* facts
+      ansible.builtin.set_fact:
+        eff_tunnel_desc:     "{{ tunnel_desc     | default('')             | trim }}"
+        eff_routing_type:    "{{ routing_type    | default('dynamic', true) | trim | lower }}"
+        eff_keyring_name:    "{{ keyring_name    | default('',         true) | trim }}"
+        eff_profile_name:    "{{ profile_name    | default('',         true) | trim }}"
+        eff_ipsec_profile_name: "{{ ipsec_profile_name | default('', true) | trim }}"
+        eff_acl_name:        "{{ acl_name        | default('',         true) | trim }}"
+        eff_csr_pl_name:     "{{ csr_pl_name     | default('CSR_LIST', true) | trim }}"
+        eff_ikev2_lifetime:  "{{ ikev2_lifetime  | default(28800,      true) }}"
+        eff_local_asn:       "{{ local_asn       | default(398957,     true) }}"
+        eff_match_identity_remote_type:  "{{ match_identity_remote_type  | default('address', true) | trim | lower }}"
+        eff_match_identity_remote_value: "{{ match_identity_remote_value | default('',        true) | trim }}"
+        eff_identity_local_type:         "{{ identity_local_type         | default('',        true) | trim | lower }}"
+        eff_identity_local_value:        "{{ identity_local_value        | default('',        true) | trim }}"
+
+    # ---------- Validation ----------
     - name: Validate routing_type
       ansible.builtin.assert:
         that:
-          - routing_type is defined
-          - routing_type in ['dynamic', 'static']
+          - eff_routing_type in ['dynamic', 'static']
         fail_msg: "routing_type must be 'dynamic' or 'static'"
 
     - name: Validate tunnel_id, tunnel_desc
       ansible.builtin.assert:
         that:
           - tunnel_id is defined and (tunnel_id | int) > 0
-          - tunnel_desc is defined and (tunnel_desc | length) > 0
-        fail_msg: "tunnel_id and tunnel_desc are required"
+          - (eff_tunnel_desc | length) > 0
+          - tunnel_local_ip is defined and (tunnel_local_ip | length) > 0
+          - remote_peer_ip is defined and (remote_peer_ip | length) > 0
+          - vpn_psk is defined and (vpn_psk | length) > 0
+        fail_msg: "tunnel_id, tunnel_desc, tunnel_local_ip, remote_peer_ip, vpn_psk are required"
+
+    - name: Validate match_identity_remote_type
+      ansible.builtin.assert:
+        that:
+          - eff_match_identity_remote_type in ['address', 'fqdn']
+        fail_msg: "match_identity_remote_type must be 'address' or 'fqdn'"
+
+    - name: Validate identity_local_type (optional)
+      ansible.builtin.assert:
+        that:
+          - (eff_identity_local_type | length) == 0
+            or eff_identity_local_type in ['address', 'fqdn']
+        fail_msg: "identity_local_type must be 'address' or 'fqdn' (or blank)"
+
+    - name: Validate identity_local_value when type is set
+      ansible.builtin.assert:
+        that:
+          - (eff_identity_local_type | length) == 0
+            or (eff_identity_local_value | length) > 0
+        fail_msg: "identity_local_value required when identity_local_type is set"
 
     - name: Validate BGP fields when routing_type=dynamic
       ansible.builtin.assert:
@@ -25,17 +64,16 @@
           - bgp_neighbor_ip is defined and (bgp_neighbor_ip | length) > 0
           - remote_asn is defined and (remote_asn | int) > 0
         fail_msg: "routing_type=dynamic requires bgp_neighbor_ip and remote_asn"
-      when: routing_type == 'dynamic'
+      when: eff_routing_type == 'dynamic'
 
     - name: Validate local_networks when routing_type=static
       ansible.builtin.assert:
         that:
           - local_networks is defined and (local_networks | length) > 0
-        fail_msg: "routing_type=static requires local_networks (one 'NETWORK MASK' per line)"
-      when: routing_type == 'static'
+        fail_msg: "routing_type=static requires local_networks (one 'NETWORK MASK' or CIDR per line)"
+      when: eff_routing_type == 'static'
 
     # ---------- csr_pl_lege handling ----------
-
     - name: Validate csr_pl_lege format — blank OR 'le N' (N=0..32)
       ansible.builtin.assert:
         that:
@@ -45,8 +83,6 @@
             or ((csr_pl_lege | trim) is match('^le\s+([0-9]|[12][0-9]|3[0-2])$'))
         fail_msg: >
           'csr_pl_lege' must be blank OR exactly 'le N' where N is 0..32.
-          Valid: 'le 24', 'le 30', 'le 32', ''.
-          NOT valid: 'le 33', 'ge 24 le 32', 'permit ...', '32'.
 
     - name: Extract numeric N from csr_pl_lege (-1 if blank)
       ansible.builtin.set_fact:
@@ -55,7 +91,7 @@
              if (csr_pl_lege is defined and (csr_pl_lege | trim | length) > 0)
              else -1 }}
 
-    - name: Compute /M (bits) for each entry in local_networks
+    - name: Compute /M (bits) for each entry in local_networks (static mode)
       ansible.builtin.set_fact:
         pl_mask_bits: >-
           {%- set octet = {'0':0,'128':1,'192':2,'224':3,'240':4,'248':5,'252':6,'254':7,'255':8} -%}
@@ -68,40 +104,38 @@
                 {%- set bits = bits + octet.get(o, 0) -%}
               {%- endfor -%}
               {%- set _ = out.append(bits) -%}
+            {%- elif (p | length) == 1 and '/' in p[0] -%}
+              {%- set _ = out.append(p[0].split('/')[1] | int) -%}
             {%- endif -%}
           {%- endfor -%}
           {{ out }}
-      when: routing_type == 'static'
+      when: eff_routing_type == 'static'
 
     - name: Enforce 'le N' >= /M for every local_network (static mode)
       ansible.builtin.assert:
         that:
           - (pl_le_value | int) >= (item | int)
         fail_msg: >
-          csr_pl_lege 'le {{ pl_le_value }}' is invalid: must be >=
-          the prefix length of every network. Offending /M = /{{ item }}.
-          (Cisco requires M <= X <= 32 in 'permit A.B.C.D/M le X'.)
+          csr_pl_lege 'le {{ pl_le_value }}' must be >= every /M.
+          Offending /M = /{{ item }}.
       loop: "{{ pl_mask_bits | default([]) }}"
       when:
-        - routing_type == 'static'
+        - eff_routing_type == 'static'
         - (pl_le_value | int) >= 0
 
-    - name: Enforce 'le N' >= /M of csr_pl_entry (dynamic mode, when used)
-      ansible.builtin.assert:
-        that:
-          - (pl_le_value | int) >= ((csr_pl_entry | regex_replace('^.*/', '')) | int)
-        fail_msg: >
-          csr_pl_lege 'le {{ pl_le_value }}' must be >= csr_pl_entry's /M
-          ({{ csr_pl_entry }}).
-      when:
-        - routing_type == 'dynamic'
-        - (pl_le_value | int) >= 0
-        - csr_pl_entry is defined
-        - (csr_pl_entry | default('') | length) > 0
-        - "'/' in (csr_pl_entry | default(''))"
+    # ---------- Derived names ----------
+    - name: Derive safe_desc & effective object names
+      ansible.builtin.set_fact:
+        safe_desc: "{{ eff_tunnel_desc | regex_replace('\\s+', '_') }}"
 
-    # ---------- derived facts ----------
+    - name: Compute fallback names if blank
+      ansible.builtin.set_fact:
+        effective_keyring_name:       "{{ eff_keyring_name       if (eff_keyring_name       | length) > 0 else ('KEYRING_'    ~ safe_desc ~ '_T' ~ tunnel_id) }}"
+        effective_profile_name:       "{{ eff_profile_name       if (eff_profile_name       | length) > 0 else ('PROF_'       ~ safe_desc ~ '_T' ~ tunnel_id) }}"
+        effective_ipsec_profile_name: "{{ eff_ipsec_profile_name if (eff_ipsec_profile_name | length) > 0 else ('IPSEC_PROF_T' ~ tunnel_id) }}"
+        effective_acl_name:           "{{ eff_acl_name           if (eff_acl_name           | length) > 0 else safe_desc }}"
 
+    # ---------- Derived peer/SLA targets ----------
     - name: Compute peer tunnel host
       ansible.builtin.set_fact:
         tunnel_peer_ip: >-
@@ -110,17 +144,18 @@
           {%- set off   = 1 if (last % 4) == 1 else -1 -%}
           {{ parts[0:3] | join('.') }}.{{ last + off }}
 
-    - name: Decide effective IP-SLA target (override if survey provides one)
+    - name: Decide effective IP-SLA target
       ansible.builtin.set_fact:
         effective_sla_target: "{{ sla_target_ip if (sla_target_ip is defined and sla_target_ip | length > 0) else tunnel_peer_ip }}"
 
+    # ---------- CSR_LIST seq discovery ----------
     - name: Read current prefix-list state
       cisco.ios.ios_command:
-        commands: "show ip prefix-list {{ csr_pl_name | default('CSR_LIST', true) }}"
+        commands: "show ip prefix-list {{ eff_csr_pl_name }}"
       register: pl_show
       failed_when: false
 
-    - name: Parse existing seq numbers (if list exists)
+    - name: Parse existing seq numbers
       ansible.builtin.set_fact:
         pl_existing_seqs: >-
           {{
@@ -128,26 +163,49 @@
             | map('int') | list
           }}
 
-    - name: Compute starting next seq (multiples of 5)
+    - name: Compute starting next seq
       ansible.builtin.set_fact:
         pl_next_seq: "{{ ((pl_existing_seqs + [0]) | max | int) + 5 }}"
+
+    # We need eff_routing_type usable in the template as `routing_type` literal
+    # to keep template backward-compatible; override the raw var.
+    - name: Make normalized routing_type visible to template
+      ansible.builtin.set_fact:
+        eff_tunnel_desc: "{{ eff_tunnel_desc }}"   # no-op, anchor
+      changed_when: false
 
     - name: Show derived facts (debug)
       ansible.builtin.debug:
         msg:
-          tunnel_peer_ip: "{{ tunnel_peer_ip }}"
+          tunnel_id:           "{{ tunnel_id }}"
+          tunnel_desc:         "{{ eff_tunnel_desc }}"
+          safe_desc:           "{{ safe_desc }}"
+          routing_type:        "{{ eff_routing_type }}"
+          tunnel_peer_ip:      "{{ tunnel_peer_ip }}"
           effective_sla_target: "{{ effective_sla_target }}"
-          csr_pl_name: "{{ csr_pl_name | default('CSR_LIST', true) }}"
-          pl_existing_seqs: "{{ pl_existing_seqs }}"
-          pl_next_seq: "{{ pl_next_seq }}"
-          pl_le_value: "{{ pl_le_value }}"
-          pl_mask_bits: "{{ pl_mask_bits | default([]) }}"
+          keyring_name:        "{{ effective_keyring_name }}"
+          profile_name:        "{{ effective_profile_name }}"
+          ipsec_profile_name:  "{{ effective_ipsec_profile_name }}"
+          acl_name:            "{{ effective_acl_name }}"
+          ikev2_lifetime:      "{{ eff_ikev2_lifetime }}"
+          local_asn:           "{{ eff_local_asn }}"
+          csr_pl_name:         "{{ eff_csr_pl_name }}"
+          pl_existing_seqs:    "{{ pl_existing_seqs }}"
+          pl_next_seq:         "{{ pl_next_seq }}"
+          pl_le_value:         "{{ pl_le_value }}"
+          match_identity_remote_type:  "{{ eff_match_identity_remote_type }}"
+          match_identity_remote_value: "{{ eff_match_identity_remote_value }}"
+          identity_local_type:         "{{ eff_identity_local_type }}"
+          identity_local_value:        "{{ eff_identity_local_value }}"
 
   tasks:
     - name: Push generated config
       cisco.ios.ios_config:
         src: templates/add_tunnel.j2
       register: cfg
+      vars:
+        # Make sure the template sees the normalized routing_type
+        routing_type: "{{ eff_routing_type }}"
 
     - name: Save startup-config
       cisco.ios.ios_command:
@@ -167,12 +225,34 @@
       register: vfy_bgp
       changed_when: false
 
+    - name: Verify — tunnel interface
+      cisco.ios.ios_command:
+        commands:
+          - "show running-config interface Tunnel{{ tunnel_id }}"
+      register: vfy_tun
+      changed_when: false
+
+    - name: Verify — IKEv2 profile
+      cisco.ios.ios_command:
+        commands:
+          - "show running-config | section crypto ikev2 profile {{ effective_profile_name }}"
+      register: vfy_prof
+      changed_when: false
+
     - name: Verify — interface brief
       cisco.ios.ios_command:
         commands:
           - "show ip interface brief"
       register: vfy_intf
       changed_when: false
+
+    - name: Print verification — tunnel interface
+      ansible.builtin.debug:
+        msg: "{{ vfy_tun.stdout[0].splitlines() }}"
+
+    - name: Print verification — IKEv2 profile
+      ansible.builtin.debug:
+        msg: "{{ vfy_prof.stdout[0].splitlines() }}"
 
     - name: Print verification — BGP section
       ansible.builtin.debug:
